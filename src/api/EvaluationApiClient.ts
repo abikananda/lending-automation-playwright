@@ -18,7 +18,13 @@ const responseSchema = z.object({
 export class EvaluationApiClient extends BaseApiClient {
   async evaluateBorrower(rule: string, request: EvaluationRequest): Promise<EvaluationResponse> {
     const path = `${config.evaluationPath}/${encodeURIComponent(rule)}`;
+    this.logApiRequest('POST', path, 'BORROWER_EVALUATION');
     const data = await this.post<unknown>(path, request);
-    return responseSchema.parse(data) as EvaluationResponse;
+    const result = responseSchema.parse(data) as EvaluationResponse;
+    this.logApiSuccess(
+      'BORROWER_EVALUATION',
+      `loanId=${result.loanId} decision=${result.decision} riskLevel=${result.riskLevel} investmentAmount=${result.investmentAmount} evaluationId=${result.evaluationId}`,
+    );
+    return result;
   }
 }
