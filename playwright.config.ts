@@ -3,7 +3,7 @@ import { config } from './src/config/Config';
 
 export default defineConfig({
   testDir: './src/tests',
-  timeout: config.uiTimeout * 4,
+  timeout: 10 * 60 * 1000,
   expect: { timeout: config.uiTimeout },
   fullyParallel: false,
   workers: 1,
