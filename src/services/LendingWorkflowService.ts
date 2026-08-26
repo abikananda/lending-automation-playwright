@@ -10,8 +10,17 @@ import { LendingRuleService } from './LendingRuleService';
 import { InvestmentService } from './InvestmentService';
 import { PersistenceService } from './PersistenceService';
 import type { ExecutionReport, BorrowerExecutionRecord } from '../models/ExecutionReport';
+import type { EvaluationResponse } from '../models/EvaluationResponse';
+import type { Borrower } from '../models/Borrower';
 import { logger } from '../utils/Logger';
 import { captureFailure } from '../utils/ScreenshotUtils';
+
+class UncertainFinancialStateError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'UncertainFinancialStateError';
+  }
+}
 
 export class LendingWorkflowService {
   private readonly lenderApi = new LenderApiClient();
@@ -43,6 +52,7 @@ export class LendingWorkflowService {
     const ui = new ManualLendingPage(this.page);
     const records: BorrowerExecutionRecord[] = [];
     const errors: string[] = [];
+    const selectedLoanIds = new Set<string>();
     let evaluated = 0;
     let invested = 0;
     let skipped = 0;
@@ -71,6 +81,7 @@ export class LendingWorkflowService {
             borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
 
             const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
+            this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
             evaluated += 1;
             logger.info(
               `Evaluation loan=${evaluation.loanId} decision=${evaluation.decision} risk=${evaluation.riskLevel} amount=₹${evaluation.investmentAmount}`,
@@ -90,10 +101,27 @@ export class LendingWorkflowService {
               continue;
             }
 
+            if (selectedLoanIds.has(borrower.loanId)) {
+              skipped += 1;
+              const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
+              logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
+              records.push({
+                rule,
+                loanId: borrower.loanId,
+                borrowerName: borrower.name,
+                status: 'SKIPPED',
+                reason,
+                evaluation,
+              });
+              await panel.close();
+              continue;
+            }
+
             investment.validateInvestmentAmount(evaluation.investmentAmount);
             await panel.setInvestmentAmount(evaluation.investmentAmount);
             await panel.addLoan();
             investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
+            selectedLoanIds.add(borrower.loanId);
             invested += 1;
             ruleInvested += 1;
 
@@ -121,7 +149,15 @@ export class LendingWorkflowService {
         // Continue is a financial action; never retry it automatically.
         if (ruleInvested > 0) {
           await ui.clickContinue();
-          await ui.validateSuccess();
+          try {
+            await ui.validateSuccess();
+          } catch (error) {
+            throw new UncertainFinancialStateError(
+              `Continue was clicked for rule ${rule}, but lending success could not be confirmed. Workflow stopped to avoid a duplicate financial action.`,
+              { cause: error },
+            );
+          }
+
           for (const record of records) {
             if (record.rule === rule && record.status === 'SELECTED') record.status = 'FINALIZED';
           }
@@ -134,6 +170,11 @@ export class LendingWorkflowService {
         failed += 1;
         logger.error(`Rule ${rule} failed: ${reason}`);
         await captureFailure(this.page, `rule-${rule}`);
+
+        if (error instanceof UncertainFinancialStateError) {
+          logger.error('Stopping workflow because the financial result is uncertain');
+          throw error;
+        }
 
         try {
           await ui.closeOpenModalIfPresent();
@@ -163,5 +204,24 @@ export class LendingWorkflowService {
 
     await this.persistenceService.result(report);
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
+  }
+
+  private validateEvaluationIdentity(
+    evaluation: EvaluationResponse,
+    borrower: Borrower,
+    sessionId: string,
+    rule: string,
+  ): void {
+    if (evaluation.loanId.trim() !== borrower.loanId.trim()) {
+      throw new Error(`Evaluation loan mismatch: expected ${borrower.loanId}, got ${evaluation.loanId}`);
+    }
+
+    if (evaluation.sessionId.trim() !== sessionId.trim()) {
+      throw new Error(`Evaluation session mismatch: expected ${sessionId}, got ${evaluation.sessionId}`);
+    }
+
+    if (evaluation.rule.trim().toUpperCase() !== rule.trim().toUpperCase()) {
+      throw new Error(`Evaluation rule mismatch: expected ${rule}, got ${evaluation.rule}`);
+    }
   }
 }

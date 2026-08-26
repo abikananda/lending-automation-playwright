@@ -8,6 +8,7 @@ export class ApiError extends Error {
     message: string,
     public readonly status?: number,
     public readonly responseBody?: unknown,
+    public readonly method?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -52,17 +53,29 @@ export class BaseApiClient {
         if (axios.isAxiosError(error)) {
           const status = error.response?.status;
           const body = error.response?.data;
-          logger.error(`API ERROR method=${error.config?.method?.toUpperCase() ?? 'UNKNOWN'} url=${error.config?.url ?? 'UNKNOWN'} status=${status ?? 'NO_STATUS'} durationMs=${durationMs} message=${error.message}`);
+          const method = error.config?.method?.toUpperCase();
+          logger.error(`API ERROR method=${method ?? 'UNKNOWN'} url=${error.config?.url ?? 'UNKNOWN'} status=${status ?? 'NO_STATUS'} durationMs=${durationMs} message=${error.message}`);
           const message = `Backend API request failed: ${status ?? 'NO_STATUS'} ${error.message}`;
-          throw new ApiError(message, status, body);
+          throw new ApiError(message, status, body, method);
         }
         logger.error(`API ERROR status=NO_STATUS durationMs=${durationMs} message=${error instanceof Error ? error.message : String(error)}`);
         throw error;
       }
     };
 
-    if (allowRetry) return retryTransient(execute);
+    if (allowRetry) return retryTransient(execute, 3, [500, 1000, 2000], (error) => this.isRetryable(error));
     return execute();
+  }
+
+  private isRetryable(error: unknown): boolean {
+    if (!(error instanceof ApiError)) return false;
+
+    // GET requests are safe to retry. POST requests may have succeeded server-side
+    // even when the response was lost, so they are deliberately not retried.
+    if (error.method !== 'GET') return false;
+
+    if (!error.status) return true;
+    return [408, 429, 500, 502, 503, 504].includes(error.status);
   }
 
   protected logApiRequest(method: string, path: string, operation: string): void {
