@@ -10,9 +10,12 @@ const otpSchema = z.union([
 
 export class OtpApiClient extends BaseApiClient {
   async fetchOtp(identifier: string): Promise<string> {
-    const data = await this.get<unknown>(`${config.otpPath}/${encodeURIComponent(identifier)}`);
+    const path = `${config.otpPath}/${encodeURIComponent(identifier)}`;
+    this.logApiRequest('GET', config.otpPath, 'OTP_FETCH');
+    const data = await this.get<unknown>(path);
     const parsed = otpSchema.parse(data);
-    if (typeof parsed === 'string') return parsed;
-    return 'otp' in parsed ? parsed.otp : parsed.code;
+    const otp = typeof parsed === 'string' ? parsed : 'otp' in parsed ? parsed.otp : parsed.code;
+    this.logApiSuccess('OTP_FETCH', 'OTP received and validated');
+    return otp;
   }
 }
