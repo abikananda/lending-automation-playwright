@@ -4,6 +4,7 @@ export async function retryTransient<T>(
   operation: () => Promise<T>,
   attempts = 3,
   delaysMs = [500, 1000, 2000],
+  shouldRetry: (error: unknown) => boolean = () => true,
 ): Promise<T> {
   let lastError: unknown;
 
@@ -12,6 +13,12 @@ export async function retryTransient<T>(
       return await operation();
     } catch (error) {
       lastError = error;
+
+      if (!shouldRetry(error)) {
+        logger.warn('Operation failed with a non-retryable error; retry skipped');
+        throw error;
+      }
+
       if (attempt === attempts) break;
       const delay = delaysMs[attempt - 1] ?? delaysMs[delaysMs.length - 1] ?? 1000;
       logger.warn(`Transient operation failed; retry ${attempt + 1}/${attempts} in ${delay}ms`);
