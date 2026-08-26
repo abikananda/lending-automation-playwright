@@ -91,7 +91,7 @@ export class ManualLendingPage {
       for (const filter of filters) await this.setCheckbox(filter, false);
     }
 
-    await this.page.getByRole('button', { name: 'Sort', exact: true }).click();
+    await this.page.locator("xpath=//button[normalize-space(text())='Sort']").click();
     await this.sort('LenDenClub Score', 'Higher to Lower');
     await this.sort('Loan amount', 'Lower to Higher');
     await this.sort('Tenure', 'Lower to Higher');
@@ -101,6 +101,22 @@ export class ManualLendingPage {
     const apply = this.page.getByRole('button', { name: 'Apply', exact: true });
     await apply.click();
     await expect(apply).toBeHidden({ timeout: config.uiTimeout });
+  }
+
+  async closeOpenModalIfPresent(): Promise<void> {
+    const modal = this.page.locator('div.MuiModal-root[role="presentation"]').last();
+    if (!(await modal.isVisible().catch(() => false))) return;
+
+    await this.page.keyboard.press('Escape').catch(() => undefined);
+    await expect(modal).toBeHidden({ timeout: 5_000 }).catch(() => undefined);
+
+    if (await modal.isVisible().catch(() => false)) {
+      const closeButton = modal.locator('button[aria-label="close"], button[aria-label="Close"], svg').first();
+      if (await closeButton.isVisible().catch(() => false)) {
+        await closeButton.click({ force: true }).catch(() => undefined);
+        await expect(modal).toBeHidden({ timeout: 5_000 }).catch(() => undefined);
+      }
+    }
   }
 
   private async sort(field: string, direction: string): Promise<void> {
