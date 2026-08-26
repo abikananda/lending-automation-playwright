@@ -7,7 +7,7 @@ export class BorrowerPanel {
   private readonly panel: Locator;
 
   constructor(private readonly page: Page) {
-    this.panel = page.locator('div.sc-dtBdUo.jipznm');
+    this.panel = page.locator('div.sc-dtBdUo.hHvdph');
   }
 
   async waitForOpen(): Promise<void> {
