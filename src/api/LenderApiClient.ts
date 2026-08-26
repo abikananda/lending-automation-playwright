@@ -22,7 +22,10 @@ const responseSchema = z.object({
 
 export class LenderApiClient extends BaseApiClient {
   async getLenderData(): Promise<LenderDataResponse> {
+    this.logApiRequest('GET', config.lenderDataPath, 'LENDER_DATA');
     const data = await this.get<unknown>(config.lenderDataPath);
-    return responseSchema.parse(data) as LenderDataResponse;
+    const result = responseSchema.parse(data) as LenderDataResponse;
+    this.logApiSuccess('LENDER_DATA', `lenderId=${result.lender.lenderId} sessionId=${result.sessionId}`);
+    return result;
   }
 }
