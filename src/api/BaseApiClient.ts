@@ -42,25 +42,35 @@ export class BaseApiClient {
     allowRetry: boolean,
   ): Promise<T> {
     const execute = async (): Promise<T> => {
+      const startedAt = Date.now();
       try {
         const response = await operation();
+        logger.info(`API RESPONSE method=${response.config.method?.toUpperCase() ?? 'UNKNOWN'} url=${response.config.url ?? 'UNKNOWN'} status=${response.status} durationMs=${Date.now() - startedAt}`);
         return response.data;
       } catch (error) {
+        const durationMs = Date.now() - startedAt;
         if (axios.isAxiosError(error)) {
           const status = error.response?.status;
           const body = error.response?.data;
+          logger.error(`API ERROR method=${error.config?.method?.toUpperCase() ?? 'UNKNOWN'} url=${error.config?.url ?? 'UNKNOWN'} status=${status ?? 'NO_STATUS'} durationMs=${durationMs} message=${error.message}`);
           const message = `Backend API request failed: ${status ?? 'NO_STATUS'} ${error.message}`;
-          if (status && status >= 400 && status < 500) {
-            throw new ApiError(message, status, body);
-          }
           throw new ApiError(message, status, body);
         }
+        logger.error(`API ERROR status=NO_STATUS durationMs=${durationMs} message=${error instanceof Error ? error.message : String(error)}`);
         throw error;
       }
     };
 
     if (allowRetry) return retryTransient(execute);
     return execute();
+  }
+
+  protected logApiRequest(method: string, path: string, operation: string): void {
+    logger.info(`API CALL operation=${operation} method=${method} path=${path}`);
+  }
+
+  protected logApiSuccess(operation: string, details?: string): void {
+    logger.info(`API SUCCESS operation=${operation}${details ? ` ${details}` : ''}`);
   }
 
   protected logApiFailure(error: unknown): void {
