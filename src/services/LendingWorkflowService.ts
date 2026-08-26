@@ -65,6 +65,7 @@ export class LendingWorkflowService {
       try {
         logger.info(`Starting rule: ${rule}`);
         let ruleInvested = 0;
+        let ruleBorrowerFailures = 0;
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
         const borrowers = await ui.getBorrowers();
@@ -84,8 +85,24 @@ export class LendingWorkflowService {
             this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
             evaluated += 1;
             logger.info(
-              `Evaluation loan=${evaluation.loanId} decision=${evaluation.decision} risk=${evaluation.riskLevel} amount=₹${evaluation.investmentAmount}`,
+              `Evaluation loan=${evaluation.loanId} decision=${evaluation.decision ?? 'NONE'} risk=${evaluation.riskLevel ?? 'NONE'} amount=₹${evaluation.investmentAmount}`,
             );
+
+            if (evaluation.decision === null) {
+              skipped += 1;
+              const reason = evaluation.reason ?? 'No investment decision returned by evaluation API';
+              logger.info(`Skipping loan=${borrower.loanId}: ${reason}`);
+              records.push({
+                rule,
+                loanId: borrower.loanId,
+                borrowerName: borrower.name,
+                status: 'SKIPPED',
+                reason,
+                evaluation,
+              });
+              await panel.close();
+              continue;
+            }
 
             if (evaluation.decision.toUpperCase() !== 'INVEST') {
               skipped += 1;
@@ -94,7 +111,7 @@ export class LendingWorkflowService {
                 loanId: borrower.loanId,
                 borrowerName: borrower.name,
                 status: 'SKIPPED',
-                reason: evaluation.reason,
+                reason: evaluation.reason ?? `Evaluation decision: ${evaluation.decision}`,
                 evaluation,
               });
               await panel.close();
@@ -137,13 +154,18 @@ export class LendingWorkflowService {
             await panel.close();
           } catch (error) {
             failed += 1;
+            ruleBorrowerFailures += 1;
             const reason = error instanceof Error ? error.message : String(error);
             errors.push(`${rule}/${summary.name}: ${reason}`);
             records.push({ rule, borrowerName: summary.name, status: 'FAILED', reason });
             logger.error(`Borrower failed: ${summary.name}: ${reason}`);
-            await captureFailure(this.page, `borrower-${summary.name}`);
             if (panel) await panel.close().catch(() => undefined);
           }
+        }
+
+        if (ruleBorrowerFailures > 0) {
+          logger.error(`Rule ${rule} completed with ${ruleBorrowerFailures} borrower failure(s)`);
+          await captureFailure(this.page, `rule-${rule}-borrowers`);
         }
 
         // Continue is a financial action; never retry it automatically.
@@ -220,7 +242,7 @@ export class LendingWorkflowService {
       throw new Error(`Evaluation session mismatch: expected ${sessionId}, got ${evaluation.sessionId}`);
     }
 
-    if (evaluation.rule.trim().toUpperCase() !== rule.trim().toUpperCase()) {
+    if (evaluation.rule !== null && evaluation.rule.trim().toUpperCase() !== rule.trim().toUpperCase()) {
       throw new Error(`Evaluation rule mismatch: expected ${rule}, got ${evaluation.rule}`);
     }
   }

@@ -7,11 +7,11 @@ import { BaseApiClient } from './BaseApiClient';
 const responseSchema = z.object({
   loanId: z.string(),
   sessionId: z.string(),
-  decision: z.string(),
-  riskLevel: z.string(),
+  decision: z.string().nullable(),
+  riskLevel: z.string().nullable(),
   investmentAmount: z.coerce.number().nonnegative(),
-  rule: z.string(),
-  reason: z.string(),
+  rule: z.string().nullable(),
+  reason: z.string().nullable(),
   evaluationId: z.coerce.number(),
 });
 
@@ -23,7 +23,7 @@ export class EvaluationApiClient extends BaseApiClient {
     const result = responseSchema.parse(data) as EvaluationResponse;
     this.logApiSuccess(
       'BORROWER_EVALUATION',
-      `loanId=${result.loanId} decision=${result.decision} riskLevel=${result.riskLevel} investmentAmount=${result.investmentAmount} evaluationId=${result.evaluationId}`,
+      `loanId=${result.loanId} decision=${result.decision ?? 'NONE'} riskLevel=${result.riskLevel ?? 'NONE'} investmentAmount=${result.investmentAmount} evaluationId=${result.evaluationId}`,
     );
     return result;
   }
