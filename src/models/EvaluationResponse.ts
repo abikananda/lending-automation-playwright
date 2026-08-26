@@ -1,10 +1,10 @@
 export interface EvaluationResponse {
   loanId: string;
   sessionId: string;
-  decision: string;
-  riskLevel: string;
+  decision: string | null;
+  riskLevel: string | null;
   investmentAmount: number;
-  rule: string;
-  reason: string;
+  rule: string | null;
+  reason: string | null;
   evaluationId: number;
 }
