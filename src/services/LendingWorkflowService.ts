@@ -134,6 +134,14 @@ export class LendingWorkflowService {
         failed += 1;
         logger.error(`Rule ${rule} failed: ${reason}`);
         await captureFailure(this.page, `rule-${rule}`);
+
+        try {
+          await ui.closeOpenModalIfPresent();
+          logger.info(`UI cleanup completed after rule failure: ${rule}`);
+        } catch (cleanupError) {
+          const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+          logger.warn(`UI cleanup failed after rule ${rule}: ${cleanupReason}`);
+        }
       }
     }
 
