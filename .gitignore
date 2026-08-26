@@ -1,0 +1,8 @@
+node_modules/
+.env
+playwright-report/
+test-results/
+reports/*.json
+reports/*.html
+reports/*.csv
+*.log

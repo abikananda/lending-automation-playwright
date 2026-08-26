@@ -1,0 +1,31 @@
+{
+  "name": "lending-automation-playwright",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LenDenClub browser automation with Playwright and backend API orchestration",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "cross-env HEADLESS=false playwright test",
+    "test:debug": "cross-env PWDEBUG=1 playwright test",
+    "build": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "winston": "^3.17.0",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.3.0",
+    "cross-env": "^10.0.0",
+    "eslint": "^9.34.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "@eslint/js": "^9.34.0",
+    "typescript-eslint": "^8.42.0"
+  }
+}
