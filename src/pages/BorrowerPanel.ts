@@ -33,11 +33,7 @@ export class BorrowerPanel {
       'Loan Amount',
       'Tenure',
       'Annualized Interest Rate',
-      'EMI',
     ], false);
-
-    const emi = loan.EMI ?? loan['EMI Amount'];
-    if (!emi) throw new Error('Missing borrower field: EMI');
 
     const borrower: Borrower = {
       loanId: (loan['Loan ID'] ?? '').trim(),
@@ -47,7 +43,7 @@ export class BorrowerPanel {
       loanAmount: parseMoney(loan['Loan Amount']),
       interestRate: parsePercent(loan['Annualized Interest Rate']),
       tenure: parseMonths(loan.Tenure),
-      emi: parseMoney(emi),
+      emi: parseMoney(loan['Loan Amount'])/parseMonths(loan.Tenure),
       age: parseNumber(personal.Age),
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,
