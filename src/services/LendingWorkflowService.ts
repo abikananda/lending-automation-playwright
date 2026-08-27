@@ -64,6 +64,7 @@ export class LendingWorkflowService {
         let ruleInvested = 0;
         let ruleBorrowerFailures = 0;
         let ruleInvestmentAmount: number | undefined;
+        let ruleParsedBorrowers = 0;
 
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
@@ -79,6 +80,10 @@ export class LendingWorkflowService {
             panel = await ui.openBorrowerByName(summary.name);
             const borrower = await panel.extractBorrower();
             borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
+            ruleParsedBorrowers += 1;
+            logger.info(
+              `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
+            );
 
             const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
             this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
@@ -172,6 +177,8 @@ export class LendingWorkflowService {
             if (panel) await panel.close().catch(() => undefined);
           }
         }
+
+        logger.info(`Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully`);
 
         if (ruleBorrowerFailures > 0) {
           logger.error(`Rule ${rule} completed with ${ruleBorrowerFailures} borrower failure(s)`);
