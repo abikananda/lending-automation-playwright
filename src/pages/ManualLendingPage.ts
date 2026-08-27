@@ -2,6 +2,7 @@ import { expect, type Locator, type Page } from '@playwright/test';
 import type { BorrowerSummary } from '../models/Borrower';
 import { config } from '../config/Config';
 import { BorrowerPanel } from './BorrowerPanel';
+import { logger } from '../utils/Logger';
 
 export interface RuleUiOptions {
   repeated: boolean;
@@ -134,56 +135,86 @@ export class ManualLendingPage {
   }
 
   async scrollToLoadMoreCards(): Promise<void> {
-    const candidates = [
-      this.page.locator("div[class*='MuiBox-root'][style*='overflow']").first(),
-      this.page.locator('div.MuiBox-root.css-rvjv84').first(),
-      this.page.locator('main, [role="main"], .MuiContainer-root').first(),
-    ];
+    const cards = this.page.locator(this.cardLocator);
+    const count = await cards.count();
 
-    for (const container of candidates) {
-      if (await container.count() && await container.isVisible().catch(() => false)) {
-        const before = await container.evaluate((el) => (el as HTMLElement).scrollTop);
-        await container.evaluate((el) => {
-          const node = el as HTMLElement;
-          node.scrollTop += node.clientHeight * 0.8;
-        });
-        await expect.poll(async () => container.evaluate((el) => (el as HTMLElement).scrollTop), {
-          timeout: 5_000,
-        }).toBeGreaterThan(before).catch(() => undefined);
-        return;
-      }
+    if (count > 0) {
+      const lastCard = cards.nth(count - 1);
+      await lastCard.scrollIntoViewIfNeeded().catch(() => undefined);
+
+      await lastCard.evaluate((el) => {
+        el.scrollIntoView({ block: 'end', inline: 'nearest' });
+
+        let parent = el.parentElement;
+        while (parent) {
+          const style = window.getComputedStyle(parent);
+          const scrollable = /(auto|scroll)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight;
+          if (scrollable) {
+            parent.scrollTop = parent.scrollHeight;
+            break;
+          }
+          parent = parent.parentElement;
+        }
+      }).catch(() => undefined);
     }
 
-    await this.page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.8));
+    await this.page.mouse.wheel(0, 1_500).catch(() => undefined);
+    await this.page.evaluate(() => window.scrollBy(0, window.innerHeight)).catch(() => undefined);
+  }
+
+  private async collectVisibleBorrowers(seen: Set<string>, result: BorrowerSummary[]): Promise<void> {
+    const cards = this.page.locator(this.cardLocator);
+    const count = await cards.count();
+
+    for (let i = 0; i < count; i += 1) {
+      const card = cards.nth(i);
+      const name = (await card.locator('div.css-69i1ev p.MuiTypography-root').first().innerText().catch(async () =>
+        card.locator("xpath=.//div[contains(@class,'css-69i1ev')]//p[1]").innerText(),
+      )).trim();
+
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      result.push({ name });
+    }
   }
 
   async getBorrowers(): Promise<BorrowerSummary[]> {
     const seen = new Set<string>();
     const result: BorrowerSummary[] = [];
-    let previousCount = 0;
+    const maxScrollAttempts = 30;
+    const maxConsecutiveNoGrowth = 3;
+    let consecutiveNoGrowth = 0;
 
-    for (let retry = 0; retry < 12; retry += 1) {
+    await this.collectVisibleBorrowers(seen, result);
+    let previousCardCount = await this.page.locator(this.cardLocator).count();
+    logger.info(`Initial borrower cards loaded: ${previousCardCount}`);
+
+    for (let attempt = 1; attempt <= maxScrollAttempts && consecutiveNoGrowth < maxConsecutiveNoGrowth; attempt += 1) {
       await this.scrollToLoadMoreCards();
-      await expect.poll(async () => this.page.locator(this.cardLocator).count(), {
-        timeout: 5_000,
-      }).toBeGreaterThanOrEqual(previousCount).catch(() => undefined);
 
-      const cards = this.page.locator(this.cardLocator);
-      const count = await cards.count();
-      if (count === previousCount) break;
-      previousCount = count;
+      const grew = await expect.poll(async () => this.page.locator(this.cardLocator).count(), {
+        timeout: 7_000,
+        intervals: [250, 500, 1_000],
+      }).toBeGreaterThan(previousCardCount).then(() => true).catch(() => false);
 
-      for (let i = 0; i < count; i += 1) {
-        const card = cards.nth(i);
-        const name = (await card.locator('div.css-69i1ev p.MuiTypography-root').first().innerText().catch(async () =>
-          card.locator("xpath=.//div[contains(@class,'css-69i1ev')]//p[1]").innerText(),
-        )).trim();
-        if (!name || seen.has(name)) continue;
-        seen.add(name);
-        result.push({ name });
+      const currentCardCount = await this.page.locator(this.cardLocator).count();
+      await this.collectVisibleBorrowers(seen, result);
+
+      if (grew || currentCardCount > previousCardCount) {
+        logger.info(
+          `Loaded more borrower cards after scroll ${attempt}: ${previousCardCount} -> ${currentCardCount} (unique borrowers: ${result.length})`,
+        );
+        previousCardCount = currentCardCount;
+        consecutiveNoGrowth = 0;
+      } else {
+        consecutiveNoGrowth += 1;
+        logger.info(
+          `No new borrower cards after scroll ${attempt} (${consecutiveNoGrowth}/${maxConsecutiveNoGrowth}); currently ${currentCardCount} cards`,
+        );
       }
     }
 
+    logger.info(`Finished loading borrower list: ${result.length} unique borrowers discovered`);
     return result;
   }
 
