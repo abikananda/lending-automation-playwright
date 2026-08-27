@@ -15,7 +15,11 @@ export default defineConfig({
   use: {
     baseURL: config.lendenClubUrl,
     headless: config.headless,
-    launchOptions: { slowMo: config.slowMo },
+    viewport: null,
+    launchOptions: {
+      slowMo: config.slowMo,
+      args: ['--start-maximized'],
+    },
     actionTimeout: config.uiTimeout,
     navigationTimeout: config.uiTimeout,
     screenshot: 'only-on-failure',
