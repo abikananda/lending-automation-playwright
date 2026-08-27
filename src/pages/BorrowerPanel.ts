@@ -43,7 +43,7 @@ export class BorrowerPanel {
       loanAmount: parseMoney(loan['Loan Amount']),
       interestRate: parsePercent(loan['Annualized Interest Rate']),
       tenure: parseMonths(loan.Tenure),
-      emi: parseMoney(loan['Loan Amount'])/parseMonths(loan.Tenure),
+      emi: parseMoney(loan['Loan Amount']) / parseMonths(loan.Tenure),
       age: parseNumber(personal.Age),
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,
@@ -88,47 +88,6 @@ export class BorrowerPanel {
     if (await close.count()) {
       await close.click({ force: true });
       await expect(this.panel).toBeHidden({ timeout: 5_000 }).catch(() => undefined);
-    }
-  }
-
-  async setInvestmentAmount(targetAmount: number): Promise<void> {
-    const input = this.page.locator(".MuiSlider-thumb input[type='range']").first();
-    await expect(input).toBeVisible();
-
-    const min = Number(await input.getAttribute('min'));
-    const max = Number(await input.getAttribute('max'));
-    const step = Number(await input.getAttribute('step'));
-    const current = Number(await input.inputValue());
-
-    if (![min, max, step, current].every(Number.isFinite)) {
-      throw new Error('Invalid slider attributes');
-    }
-
-    if (targetAmount < min || targetAmount > max) {
-      throw new Error(`Investment ${targetAmount} is outside slider range [${min}, ${max}]`);
-    }
-
-    const remainder = (targetAmount - min) % step;
-    if (Math.abs(remainder) > 1e-9 && Math.abs(remainder - step) > 1e-9) {
-      throw new Error(`Investment ${targetAmount} cannot be represented by slider step ${step}`);
-    }
-
-    if (current !== targetAmount) {
-      await input.focus();
-      const steps = Math.abs((targetAmount - current) / step);
-      const key = targetAmount > current ? 'ArrowRight' : 'ArrowLeft';
-      for (let i = 0; i < steps; i += 1) await input.press(key);
-    }
-
-    await expect(input).toHaveValue(String(targetAmount));
-    await expect(input).toHaveAttribute('aria-valuenow', String(targetAmount));
-
-    const label = this.page.locator('.MuiSlider-valueLabelLabel').first();
-    if (await label.count()) {
-      const text = (await label.innerText()).replace(/[^0-9.-]/g, '');
-      if (text && Number(text) !== targetAmount) {
-        throw new Error(`Visible slider label ${text} does not match ${targetAmount}`);
-      }
     }
   }
 

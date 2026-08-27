@@ -66,6 +66,8 @@ export class LendingWorkflowService {
         logger.info(`Starting rule: ${rule}`);
         let ruleInvested = 0;
         let ruleBorrowerFailures = 0;
+        let ruleInvestmentAmount: number | undefined;
+
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
         const borrowers = await ui.getBorrowers();
@@ -134,9 +136,20 @@ export class LendingWorkflowService {
               continue;
             }
 
+            if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
+              throw new Error(
+                `Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`,
+              );
+            }
+
             investment.validateInvestmentAmount(evaluation.investmentAmount);
-            await panel.setInvestmentAmount(evaluation.investmentAmount);
             await panel.addLoan();
+
+            if (ruleInvestmentAmount === undefined) {
+              ruleInvestmentAmount = evaluation.investmentAmount;
+              logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
+            }
+
             investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
             selectedLoanIds.add(borrower.loanId);
             invested += 1;
@@ -168,8 +181,18 @@ export class LendingWorkflowService {
           await captureFailure(this.page, `rule-${rule}-borrowers`);
         }
 
+        // Slider is rule-level: set it once after all borrowers are selected and immediately before Continue.
         // Continue is a financial action; never retry it automatically.
         if (ruleInvested > 0) {
+          if (ruleInvestmentAmount === undefined) {
+            throw new Error(`Missing investment amount for rule ${rule} despite ${ruleInvested} selected loan(s)`);
+          }
+
+          await ui.setInvestmentAmount(ruleInvestmentAmount);
+          logger.info(
+            `Rule ${rule} slider set to ₹${ruleInvestmentAmount} for ${ruleInvested} selected loan(s) before Continue`,
+          );
+
           await ui.clickContinue();
           try {
             await ui.validateSuccess();
