@@ -1,10 +1,8 @@
 import type { Page } from '@playwright/test';
 import { LenderApiClient } from '../api/LenderApiClient';
-import { OtpApiClient } from '../api/OtpApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
 import { PersistenceApiClient } from '../api/PersistenceApiClient';
 import { ManualLendingPage } from '../pages/ManualLendingPage';
-import { LoginService } from './LoginService';
 import { BorrowerService } from './BorrowerService';
 import { LendingRuleService } from './LendingRuleService';
 import { InvestmentService } from './InvestmentService';
@@ -14,6 +12,7 @@ import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { Borrower } from '../models/Borrower';
 import { logger } from '../utils/Logger';
 import { captureFailure } from '../utils/ScreenshotUtils';
+import { config } from '../config/Config';
 
 class UncertainFinancialStateError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -24,7 +23,6 @@ class UncertainFinancialStateError extends Error {
 
 export class LendingWorkflowService {
   private readonly lenderApi = new LenderApiClient();
-  private readonly otpApi = new OtpApiClient();
   private readonly evaluationApi = new EvaluationApiClient();
   private readonly persistenceApi = new PersistenceApiClient();
   private readonly ruleService = new LendingRuleService();
@@ -44,8 +42,7 @@ export class LendingWorkflowService {
     logger.info(`Rules: ${JSON.stringify(lenderData.lender.lendingRules)}`);
     await this.persistenceService.session(lenderData);
 
-    const otpIdentifier = lenderData.sessionId;
-    await new LoginService(this.otpApi).login(this.page, lenderData.lender.mobileNumber, otpIdentifier);
+    await this.ensureReusableAuthenticatedSession();
 
     const investment = new InvestmentService(lenderData.lender);
     const borrowerService = new BorrowerService(this.evaluationApi, this.persistenceApi);
@@ -249,6 +246,20 @@ export class LendingWorkflowService {
 
     await this.persistenceService.result(report);
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
+  }
+
+  private async ensureReusableAuthenticatedSession(): Promise<void> {
+    await this.page.goto(`${config.lendenClubUrl}/manual-lending`, { waitUntil: 'domcontentloaded' });
+
+    const currentUrl = this.page.url();
+    const redirectedToLogin = /\/login(?:[/?#]|$)/i.test(currentUrl);
+    const loginUiVisible = await this.page.locator('#otp, input[type="tel"]').first().isVisible().catch(() => false);
+
+    if (redirectedToLogin || loginUiVisible) {
+      throw new Error('Saved LenDenClub session is missing or expired. Run: npm run auth');
+    }
+
+    logger.info('Reused saved LenDenClub authenticated session');
   }
 
   private validateEvaluationIdentity(
