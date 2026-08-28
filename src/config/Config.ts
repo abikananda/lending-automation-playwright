@@ -28,7 +28,9 @@ export const config = {
   apiTimeout: numberEnv('API_TIMEOUT', 30_000),
   uiTimeout: numberEnv('UI_TIMEOUT', 30_000),
   lendingSuccessUrlPattern: required('LENDING_SUCCESS_URL_PATTERN', 'manual-lending-success'),
+  backendHealthPath: required('BACKEND_HEALTH_PATH', '/actuator/health'),
   lenderDataPath: required('LENDER_DATA_PATH', '/api/lender/data'),
+  lenderSessionPath: required('LENDER_SESSION_PATH', '/api/lender/session'),
   otpPath: required('OTP_PATH', '/api/fetchOtp'),
   evaluationPath: required('EVALUATION_PATH', '/api/borrower/evaluate'),
   persistence: {
