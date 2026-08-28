@@ -6,5 +6,5 @@ export interface EvaluationResponse {
   investmentAmount: number;
   rule: string | null;
   reason: string | null;
-  evaluationId: number;
+  evaluationId: number | null;
 }
