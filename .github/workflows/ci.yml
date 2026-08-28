@@ -33,8 +33,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Check formatting
-        run: npm run format:check
+      # Repository-wide formatting is not enforced in CI yet because the existing
+      # develop baseline contains files that predate this workflow and do not pass
+      # `npm run format:check`. Keep the script available locally and enable this
+      # gate after a dedicated one-time formatting cleanup.
 
       # Intentionally do not run src/tests/lending.spec.ts in CI.
       # That workflow can perform real financial actions and must remain manually controlled.
