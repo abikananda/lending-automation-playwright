@@ -12,7 +12,7 @@ const responseSchema = z.object({
   investmentAmount: z.coerce.number().nonnegative(),
   rule: z.string().nullable(),
   reason: z.string().nullable(),
-  evaluationId: z.coerce.number(),
+  evaluationId: z.coerce.number().nullable(),
 });
 
 export class EvaluationApiClient extends BaseApiClient {
@@ -23,7 +23,7 @@ export class EvaluationApiClient extends BaseApiClient {
     const result = responseSchema.parse(data) as EvaluationResponse;
     this.logApiSuccess(
       'BORROWER_EVALUATION',
-      `loanId=${result.loanId} decision=${result.decision ?? 'NONE'} riskLevel=${result.riskLevel ?? 'NONE'} investmentAmount=${result.investmentAmount} evaluationId=${result.evaluationId}`,
+      `loanId=${result.loanId} decision=${result.decision ?? 'NONE'} riskLevel=${result.riskLevel ?? 'NONE'} investmentAmount=${result.investmentAmount} evaluationId=${result.evaluationId ?? 'NONE'}`,
     );
     return result;
   }
