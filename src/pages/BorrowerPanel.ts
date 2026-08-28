@@ -47,7 +47,7 @@ export class BorrowerPanel {
       age: parseNumber(personal.Age),
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,
-      name: personal.Name?.trim(),
+      name: (personal.Name ?? '').trim(),
     };
 
     if (!borrower.loanId) throw new Error('Missing borrower field: Loan ID');

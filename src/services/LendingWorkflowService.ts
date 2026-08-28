@@ -3,11 +3,13 @@ import { ApiError } from '../api/BaseApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
 import { HealthApiClient } from '../api/HealthApiClient';
 import { LenderApiClient } from '../api/LenderApiClient';
+import { NpaBorrowerApiClient } from '../api/NpaBorrowerApiClient';
 import { PersistenceApiClient } from '../api/PersistenceApiClient';
 import { config } from '../config/Config';
 import type { Borrower } from '../models/Borrower';
 import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
+import type { NpaBorrower } from '../models/NpaBorrower';
 import { ManualLendingPage } from '../pages/ManualLendingPage';
 import { captureFailure } from '../utils/ScreenshotUtils';
 import { logger } from '../utils/Logger';
@@ -27,6 +29,7 @@ export class LendingWorkflowService {
   private readonly healthApi = new HealthApiClient();
   private readonly lenderApi = new LenderApiClient();
   private readonly evaluationApi = new EvaluationApiClient();
+  private readonly npaBorrowerApi = new NpaBorrowerApiClient();
   private readonly persistenceApi = new PersistenceApiClient();
   private readonly ruleService = new LendingRuleService();
   private readonly persistenceService = new PersistenceService(this.persistenceApi);
@@ -47,6 +50,14 @@ export class LendingWorkflowService {
     logger.info(`Wallet: ₹${lenderData.lender.walletAmount}`);
     logger.info(`Rules: ${JSON.stringify(lenderData.lender.lendingRules)}`);
     await this.persistenceService.session(lenderData);
+
+    // Load the NPA deny-list exactly once per workflow run. If this fails, abort before any
+    // financial selection so a backend outage cannot bypass the NPA protection.
+    const npaBorrowers = await this.npaBorrowerApi.getActiveBorrowers();
+    const npaBorrowersByName = new Map<string, NpaBorrower>(
+      npaBorrowers.map((borrower) => [this.normalizeBorrowerName(borrower.borrowerName), borrower]),
+    );
+    logger.info(`Loaded ${npaBorrowersByName.size} active NPA borrower(s) for this run`);
 
     await this.ensureReusableAuthenticatedSession();
 
@@ -122,6 +133,39 @@ export class LendingWorkflowService {
                 borrowerName: borrower.name,
                 status: 'SKIPPED',
                 reason: evaluation.reason ?? `Evaluation decision: ${evaluation.decision}`,
+                evaluation,
+              });
+              await panel.close();
+              continue;
+            }
+
+            // NPA is a hard deny after risk evaluation and before any browser investment action.
+            const npaBorrower = npaBorrowersByName.get(this.normalizeBorrowerName(borrower.name));
+            if (npaBorrower) {
+              skipped += 1;
+              const reason = `NPA borrower matched; investment blocked (NPA id=${npaBorrower.id})`;
+              logger.warn(
+                `NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`,
+              );
+
+              try {
+                await this.npaBorrowerApi.recordHit(
+                  npaBorrower.id,
+                  lenderData.sessionId,
+                  borrower.loanId,
+                );
+              } catch (error) {
+                logger.error(
+                  `NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+
+              records.push({
+                rule,
+                loanId: borrower.loanId,
+                borrowerName: borrower.name,
+                status: 'SKIPPED',
+                reason,
                 evaluation,
               });
               await panel.close();
@@ -279,6 +323,10 @@ export class LendingWorkflowService {
     }
 
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
+  }
+
+  private normalizeBorrowerName(name: string): string {
+    return name.trim().toLowerCase();
   }
 
   private async ensureReusableAuthenticatedSession(): Promise<void> {

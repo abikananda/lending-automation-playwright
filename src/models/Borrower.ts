@@ -16,6 +16,6 @@ export interface Borrower {
   borrowerType: string;
   repeated: boolean;
   trusted?: boolean;
-  name?: string;
+  name: string;
   lendingAmount?: number;
 }
