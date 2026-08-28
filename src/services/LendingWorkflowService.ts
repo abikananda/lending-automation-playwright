@@ -1,18 +1,20 @@
 import type { Page } from '@playwright/test';
-import { LenderApiClient } from '../api/LenderApiClient';
+import { ApiError } from '../api/BaseApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
+import { HealthApiClient } from '../api/HealthApiClient';
+import { LenderApiClient } from '../api/LenderApiClient';
 import { PersistenceApiClient } from '../api/PersistenceApiClient';
-import { ManualLendingPage } from '../pages/ManualLendingPage';
-import { BorrowerService } from './BorrowerService';
-import { LendingRuleService } from './LendingRuleService';
-import { InvestmentService } from './InvestmentService';
-import { PersistenceService } from './PersistenceService';
-import type { ExecutionReport, BorrowerExecutionRecord } from '../models/ExecutionReport';
-import type { EvaluationResponse } from '../models/EvaluationResponse';
-import type { Borrower } from '../models/Borrower';
-import { logger } from '../utils/Logger';
-import { captureFailure } from '../utils/ScreenshotUtils';
 import { config } from '../config/Config';
+import type { Borrower } from '../models/Borrower';
+import type { EvaluationResponse } from '../models/EvaluationResponse';
+import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
+import { ManualLendingPage } from '../pages/ManualLendingPage';
+import { captureFailure } from '../utils/ScreenshotUtils';
+import { logger } from '../utils/Logger';
+import { BorrowerService } from './BorrowerService';
+import { InvestmentService } from './InvestmentService';
+import { LendingRuleService } from './LendingRuleService';
+import { PersistenceService } from './PersistenceService';
 
 class UncertainFinancialStateError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -22,6 +24,7 @@ class UncertainFinancialStateError extends Error {
 }
 
 export class LendingWorkflowService {
+  private readonly healthApi = new HealthApiClient();
   private readonly lenderApi = new LenderApiClient();
   private readonly evaluationApi = new EvaluationApiClient();
   private readonly persistenceApi = new PersistenceApiClient();
@@ -32,6 +35,9 @@ export class LendingWorkflowService {
 
   async execute(): Promise<void> {
     logger.info('Starting lending workflow');
+
+    // Fail before creating a backend lending session if the backend/DB is unavailable.
+    await this.healthApi.assertHealthy();
 
     const lenderData = await this.lenderApi.getLenderData();
     if (!lenderData.lender.active) throw new Error('Lender is inactive; stopping workflow');
@@ -168,6 +174,15 @@ export class LendingWorkflowService {
 
             await panel.close();
           } catch (error) {
+            if (this.isRuleEvaluationFailure(error)) {
+              skipped += 1;
+              const reason = this.ruleEvaluationFailureReason(error);
+              records.push({ rule, borrowerName: summary.name, status: 'SKIPPED', reason });
+              logger.warn(`Skipping borrower after backend rule failure: ${summary.name}: ${reason}`);
+              if (panel) await panel.close().catch(() => undefined);
+              continue;
+            }
+
             failed += 1;
             ruleBorrowerFailures += 1;
             const reason = error instanceof Error ? error.message : String(error);
@@ -252,6 +267,17 @@ export class LendingWorkflowService {
     };
 
     await this.persistenceService.result(report);
+
+    // Session completion is bookkeeping only. Never make a completed financial workflow retryable
+    // just because this final metadata call failed.
+    try {
+      await this.lenderApi.completeSession(lenderData.sessionId);
+    } catch (error) {
+      logger.error(
+        `Workflow finished but backend session completion failed for ${lenderData.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
   }
 
@@ -267,6 +293,24 @@ export class LendingWorkflowService {
     }
 
     logger.info('Reused saved LenDenClub authenticated session');
+  }
+
+  private isRuleEvaluationFailure(error: unknown): error is ApiError {
+    if (!(error instanceof ApiError) || error.status !== 422 || typeof error.responseBody !== 'object' || error.responseBody === null) {
+      return false;
+    }
+
+    return (error.responseBody as { error?: unknown }).error === 'RULE_EVALUATION_FAILED';
+  }
+
+  private ruleEvaluationFailureReason(error: ApiError): string {
+    if (typeof error.responseBody === 'object' && error.responseBody !== null) {
+      const body = error.responseBody as { message?: unknown; correlationId?: unknown };
+      const message = typeof body.message === 'string' ? body.message : error.message;
+      const correlationId = typeof body.correlationId === 'string' ? ` correlationId=${body.correlationId}` : '';
+      return `${message}${correlationId}`;
+    }
+    return error.message;
   }
 
   private validateEvaluationIdentity(
