@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import axios, { type AxiosInstance, type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import { config } from '../config/Config';
 import { logger } from '../utils/Logger';
@@ -9,6 +10,7 @@ export class ApiError extends Error {
     public readonly status?: number,
     public readonly responseBody?: unknown,
     public readonly method?: string,
+    public readonly correlationId?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -19,10 +21,26 @@ export class BaseApiClient {
   protected readonly http: AxiosInstance;
 
   constructor() {
+    const headers: Record<string, string> = {
+      Accept: '*/*',
+      'Content-Type': 'application/json',
+    };
+
+    if (config.backendApiKey) {
+      headers[config.backendAuthHeader] = config.backendApiKey;
+    }
+
     this.http = axios.create({
       baseURL: config.backendUrl,
       timeout: config.apiTimeout,
-      headers: { Accept: '*/*', 'Content-Type': 'application/json' },
+      headers,
+    });
+
+    this.http.interceptors.request.use((request) => {
+      if (!request.headers.get('X-Correlation-Id')) {
+        request.headers.set('X-Correlation-Id', `PW-${randomUUID()}`);
+      }
+      return request;
     });
   }
 
@@ -46,7 +64,10 @@ export class BaseApiClient {
       const startedAt = Date.now();
       try {
         const response = await operation();
-        logger.info(`API RESPONSE method=${response.config.method?.toUpperCase() ?? 'UNKNOWN'} url=${response.config.url ?? 'UNKNOWN'} status=${response.status} durationMs=${Date.now() - startedAt}`);
+        const correlationId = response.headers['x-correlation-id'];
+        logger.info(
+          `API RESPONSE method=${response.config.method?.toUpperCase() ?? 'UNKNOWN'} url=${response.config.url ?? 'UNKNOWN'} status=${response.status} durationMs=${Date.now() - startedAt}${correlationId ? ` correlationId=${correlationId}` : ''}`,
+        );
         return response.data;
       } catch (error) {
         const durationMs = Date.now() - startedAt;
@@ -54,9 +75,12 @@ export class BaseApiClient {
           const status = error.response?.status;
           const body = error.response?.data;
           const method = error.config?.method?.toUpperCase();
-          logger.error(`API ERROR method=${method ?? 'UNKNOWN'} url=${error.config?.url ?? 'UNKNOWN'} status=${status ?? 'NO_STATUS'} durationMs=${durationMs} message=${error.message}`);
+          const correlationId = error.response?.headers?.['x-correlation-id'] as string | undefined;
+          logger.error(
+            `API ERROR method=${method ?? 'UNKNOWN'} url=${error.config?.url ?? 'UNKNOWN'} status=${status ?? 'NO_STATUS'} durationMs=${durationMs} message=${error.message}${correlationId ? ` correlationId=${correlationId}` : ''}`,
+          );
           const message = `Backend API request failed: ${status ?? 'NO_STATUS'} ${error.message}`;
-          throw new ApiError(message, status, body, method);
+          throw new ApiError(message, status, body, method, correlationId);
         }
         logger.error(`API ERROR status=NO_STATUS durationMs=${durationMs} message=${error instanceof Error ? error.message : String(error)}`);
         throw error;
@@ -88,7 +112,9 @@ export class BaseApiClient {
 
   protected logApiFailure(error: unknown): void {
     if (error instanceof ApiError) {
-      logger.error(`${error.message}${error.responseBody ? ` body=${JSON.stringify(error.responseBody)}` : ''}`);
+      logger.error(
+        `${error.message}${error.correlationId ? ` correlationId=${error.correlationId}` : ''}${error.responseBody ? ` body=${JSON.stringify(error.responseBody)}` : ''}`,
+      );
     } else {
       logger.error(error instanceof Error ? error.message : String(error));
     }

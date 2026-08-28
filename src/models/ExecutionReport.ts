@@ -1,4 +1,3 @@
-import type { Borrower } from './Borrower';
 import type { EvaluationResponse } from './EvaluationResponse';
 
 export type BorrowerStatus = 'SELECTED' | 'FINALIZED' | 'SKIPPED' | 'FAILED' | 'UNCERTAIN';
