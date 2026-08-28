@@ -235,30 +235,73 @@ npm install
 npx playwright install
 ```
 
-## Run
+## How to run the project
 
-Headed mode is the default:
+### 1. Create or refresh the saved LenDenClub login session
+
+Run this only the first time, or whenever the saved LenDenClub session expires:
+
+```bash
+npm run auth
+```
+
+This performs the OTP login once and saves the authenticated browser state locally under `playwright/.auth/`.
+
+### 2. Run the lending automation
 
 ```bash
 npm test
 ```
 
-Explicit headed mode:
+Normal runs reuse the saved LenDenClub authentication state, so OTP login is not repeated.
+
+### 3. Run in explicit headed mode
 
 ```bash
 npm run test:headed
 ```
 
-Debug mode:
+### 4. Run in Playwright debug mode
 
 ```bash
 npm run test:debug
 ```
 
-Build/type-check:
+### 5. Build / type-check
 
 ```bash
 npm run build
+```
+
+### 6. Lint
+
+```bash
+npm run lint
+```
+
+### 7. Format / verify formatting
+
+```bash
+npm run format
+npm run format:check
+```
+
+If a normal run fails with:
+
+```text
+Saved LenDenClub session is missing or expired. Run: npm run auth
+```
+
+refresh the login state once:
+
+```bash
+npm run auth
+```
+
+and then run the project again:
+
+```bash
+npm test
 ```
 
 ## Reports

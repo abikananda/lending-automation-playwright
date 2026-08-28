@@ -5,4 +5,5 @@ test-results/
 reports/*.json
 reports/*.html
 reports/*.csv
+playwright/.auth/
 *.log

@@ -1,10 +1,8 @@
 import type { Page } from '@playwright/test';
 import { LenderApiClient } from '../api/LenderApiClient';
-import { OtpApiClient } from '../api/OtpApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
 import { PersistenceApiClient } from '../api/PersistenceApiClient';
 import { ManualLendingPage } from '../pages/ManualLendingPage';
-import { LoginService } from './LoginService';
 import { BorrowerService } from './BorrowerService';
 import { LendingRuleService } from './LendingRuleService';
 import { InvestmentService } from './InvestmentService';
@@ -14,6 +12,7 @@ import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { Borrower } from '../models/Borrower';
 import { logger } from '../utils/Logger';
 import { captureFailure } from '../utils/ScreenshotUtils';
+import { config } from '../config/Config';
 
 class UncertainFinancialStateError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -24,7 +23,6 @@ class UncertainFinancialStateError extends Error {
 
 export class LendingWorkflowService {
   private readonly lenderApi = new LenderApiClient();
-  private readonly otpApi = new OtpApiClient();
   private readonly evaluationApi = new EvaluationApiClient();
   private readonly persistenceApi = new PersistenceApiClient();
   private readonly ruleService = new LendingRuleService();
@@ -44,8 +42,7 @@ export class LendingWorkflowService {
     logger.info(`Rules: ${JSON.stringify(lenderData.lender.lendingRules)}`);
     await this.persistenceService.session(lenderData);
 
-    const otpIdentifier = lenderData.sessionId;
-    await new LoginService(this.otpApi).login(this.page, lenderData.lender.mobileNumber, otpIdentifier);
+    await this.ensureReusableAuthenticatedSession();
 
     const investment = new InvestmentService(lenderData.lender);
     const borrowerService = new BorrowerService(this.evaluationApi, this.persistenceApi);
@@ -66,6 +63,9 @@ export class LendingWorkflowService {
         logger.info(`Starting rule: ${rule}`);
         let ruleInvested = 0;
         let ruleBorrowerFailures = 0;
+        let ruleInvestmentAmount: number | undefined;
+        let ruleParsedBorrowers = 0;
+
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
         const borrowers = await ui.getBorrowers();
@@ -80,6 +80,10 @@ export class LendingWorkflowService {
             panel = await ui.openBorrowerByName(summary.name);
             const borrower = await panel.extractBorrower();
             borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
+            ruleParsedBorrowers += 1;
+            logger.info(
+              `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
+            );
 
             const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
             this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
@@ -134,9 +138,20 @@ export class LendingWorkflowService {
               continue;
             }
 
+            if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
+              throw new Error(
+                `Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`,
+              );
+            }
+
             investment.validateInvestmentAmount(evaluation.investmentAmount);
-            await panel.setInvestmentAmount(evaluation.investmentAmount);
             await panel.addLoan();
+
+            if (ruleInvestmentAmount === undefined) {
+              ruleInvestmentAmount = evaluation.investmentAmount;
+              logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
+            }
+
             investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
             selectedLoanIds.add(borrower.loanId);
             invested += 1;
@@ -163,13 +178,25 @@ export class LendingWorkflowService {
           }
         }
 
+        logger.info(`Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully`);
+
         if (ruleBorrowerFailures > 0) {
           logger.error(`Rule ${rule} completed with ${ruleBorrowerFailures} borrower failure(s)`);
           await captureFailure(this.page, `rule-${rule}-borrowers`);
         }
 
+        // Slider is rule-level: set it once after all borrowers are selected and immediately before Continue.
         // Continue is a financial action; never retry it automatically.
         if (ruleInvested > 0) {
+          if (ruleInvestmentAmount === undefined) {
+            throw new Error(`Missing investment amount for rule ${rule} despite ${ruleInvested} selected loan(s)`);
+          }
+
+          await ui.setInvestmentAmount(ruleInvestmentAmount);
+          logger.info(
+            `Rule ${rule} slider set to ₹${ruleInvestmentAmount} for ${ruleInvested} selected loan(s) before Continue`,
+          );
+
           await ui.clickContinue();
           try {
             await ui.validateSuccess();
@@ -226,6 +253,20 @@ export class LendingWorkflowService {
 
     await this.persistenceService.result(report);
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
+  }
+
+  private async ensureReusableAuthenticatedSession(): Promise<void> {
+    await this.page.goto(`${config.lendenClubUrl}/manual-lending`, { waitUntil: 'domcontentloaded' });
+
+    const currentUrl = this.page.url();
+    const redirectedToLogin = /\/login(?:[/?#]|$)/i.test(currentUrl);
+    const loginUiVisible = await this.page.locator('#otp, input[type="tel"]').first().isVisible().catch(() => false);
+
+    if (redirectedToLogin || loginUiVisible) {
+      throw new Error('Saved LenDenClub session is missing or expired. Run: npm run auth');
+    }
+
+    logger.info('Reused saved LenDenClub authenticated session');
   }
 
   private validateEvaluationIdentity(
