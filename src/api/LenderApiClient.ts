@@ -28,4 +28,11 @@ export class LenderApiClient extends BaseApiClient {
     this.logApiSuccess('LENDER_DATA', `lenderId=${result.lender.lenderId} sessionId=${result.sessionId}`);
     return result;
   }
+
+  async completeSession(sessionId: string): Promise<void> {
+    const path = `${config.lenderSessionPath}/${encodeURIComponent(sessionId)}/complete`;
+    this.logApiRequest('POST', path, 'COMPLETE_SESSION');
+    await this.postFinancial<unknown>(path, {});
+    this.logApiSuccess('COMPLETE_SESSION', `sessionId=${sessionId}`);
+  }
 }
