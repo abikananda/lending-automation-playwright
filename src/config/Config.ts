@@ -40,6 +40,7 @@ export const config = {
   lenderSessionPath: required('LENDER_SESSION_PATH', '/api/lender/session'),
   otpPath: required('OTP_PATH', '/api/fetchOtp'),
   evaluationPath: required('EVALUATION_PATH', '/api/borrower/evaluate'),
+  npaBorrowerPath: required('NPA_BORROWER_PATH', '/api/npa-borrowers'),
   persistence: {
     borrower: process.env.PERSIST_BORROWER_PATH,
     evaluation: process.env.PERSIST_EVALUATION_PATH,
