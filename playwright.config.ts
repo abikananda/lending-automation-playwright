@@ -1,5 +1,6 @@
 import { defineConfig } from '@playwright/test';
 import { config } from './src/config/Config';
+import { runPaths } from './src/config/RunPaths';
 
 export default defineConfig({
   testDir: './src/tests',
@@ -8,9 +9,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
+  outputDir: runPaths.testResults,
   reporter: [
     ['list'],
-    ['html', { outputFolder: 'playwright-report', open: 'never' }],
+    ['html', { outputFolder: runPaths.htmlReport, open: 'never' }],
   ],
   use: {
     baseURL: config.lendenClubUrl,
