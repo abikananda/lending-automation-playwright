@@ -73,149 +73,111 @@ export class LendingWorkflowService {
     let failed = 0;
     let totalBorrowers = 0;
 
-    const rules = this.ruleService.getRuleOrder(lenderData.lender.lendingRules);
+    for (const rule of lenderData.lender.lendingRules) {
+      let ruleInvested = 0;
+      let ruleBorrowerFailures = 0;
+      let ruleParsedBorrowers = 0;
+      let ruleInvestmentAmount: number | undefined;
 
-    for (const rule of rules) {
       try {
         logger.info(`Starting rule: ${rule}`);
-        let ruleInvested = 0;
-        let ruleBorrowerFailures = 0;
-        let ruleInvestmentAmount: number | undefined;
-        let ruleParsedBorrowers = 0;
+        await ui.openRule(rule);
+        await ui.applyFiltersAndSort(rule);
 
-        await ui.openLoanListForRule(rule);
-        await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
         const borrowers = await ui.getBorrowers();
         totalBorrowers += borrowers.length;
-        logger.info(`Borrowers found for ${rule}: ${borrowers.length}`);
+        logger.info(`Found ${borrowers.length} borrower(s) for rule ${rule}`);
 
         for (const summary of borrowers) {
-          if (!summary.name) continue;
-
           let panel;
           try {
-            panel = await ui.openBorrowerByName(summary.name);
+            panel = await ui.openBorrower(summary);
             const borrower = await panel.extractBorrower();
-            borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
             ruleParsedBorrowers += 1;
-            logger.info(
-              `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
-            );
+            logger.info(`Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`);
 
             const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
-            this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
             evaluated += 1;
-            logger.info(
-              `Evaluation loan=${evaluation.loanId} decision=${evaluation.decision ?? 'NONE'} risk=${evaluation.riskLevel ?? 'NONE'} amount=₹${evaluation.investmentAmount}`,
-            );
 
-            if (evaluation.decision === null) {
+            if (evaluation.loanId !== borrower.loanId || evaluation.sessionId !== lenderData.sessionId) {
+              throw new Error(
+                `Evaluation identity mismatch: borrower=${borrower.loanId}, responseLoan=${evaluation.loanId}, session=${evaluation.sessionId}`,
+              );
+            }
+
+            if (evaluation.rule !== null && evaluation.rule !== rule) {
+              throw new Error(`Evaluation rule mismatch: requested=${rule}, response=${evaluation.rule}`);
+            }
+
+            if (evaluation.decision !== 'INVEST') {
               skipped += 1;
-              const reason = evaluation.reason ?? 'No investment decision returned by evaluation API';
-              logger.info(`Skipping loan=${borrower.loanId}: ${reason}`);
               records.push({
                 rule,
-                loanId: borrower.loanId,
                 borrowerName: borrower.name,
+                loanId: borrower.loanId,
                 status: 'SKIPPED',
-                reason,
-                evaluation,
+                reason: evaluation.reason ?? 'Evaluation did not select borrower for investment',
               });
               await panel.close();
               continue;
             }
 
-            if (evaluation.decision.toUpperCase() !== 'INVEST') {
-              skipped += 1;
-              records.push({
-                rule,
-                loanId: borrower.loanId,
-                borrowerName: borrower.name,
-                status: 'SKIPPED',
-                reason: evaluation.reason ?? `Evaluation decision: ${evaluation.decision}`,
-                evaluation,
-              });
-              await panel.close();
-              continue;
-            }
-
-            // NPA is a hard deny after risk evaluation and before any browser investment action.
             const npaBorrower = npaBorrowersByName.get(this.normalizeBorrowerName(borrower.name));
             if (npaBorrower) {
               skipped += 1;
               const reason = `NPA borrower matched; investment blocked (NPA id=${npaBorrower.id})`;
-              logger.warn(
-                `NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`,
-              );
-
+              records.push({ rule, borrowerName: borrower.name, loanId: borrower.loanId, status: 'SKIPPED', reason });
+              logger.warn(`NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`);
               try {
-                await this.npaBorrowerApi.recordHit(
-                  npaBorrower.id,
-                  lenderData.sessionId,
-                  borrower.loanId,
-                );
+                await this.npaBorrowerApi.recordHit(npaBorrower.id, lenderData.sessionId, borrower.loanId);
               } catch (error) {
                 logger.error(
-                  `NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`,
+                  `NPA borrower remains blocked but hit bookkeeping failed for npaId=${npaBorrower.id}: ${error instanceof Error ? error.message : String(error)}`,
                 );
               }
-
-              records.push({
-                rule,
-                loanId: borrower.loanId,
-                borrowerName: borrower.name,
-                status: 'SKIPPED',
-                reason,
-                evaluation,
-              });
               await panel.close();
               continue;
             }
 
             if (selectedLoanIds.has(borrower.loanId)) {
               skipped += 1;
-              const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
-              logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
               records.push({
                 rule,
-                loanId: borrower.loanId,
                 borrowerName: borrower.name,
+                loanId: borrower.loanId,
                 status: 'SKIPPED',
-                reason,
-                evaluation,
+                reason: 'Loan already selected in this workflow',
               });
               await panel.close();
               continue;
             }
 
-            if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
-              throw new Error(
-                `Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`,
-              );
+            if (evaluation.investmentAmount === null || evaluation.investmentAmount <= 0) {
+              throw new Error(`INVEST evaluation has invalid investment amount: ${evaluation.investmentAmount}`);
             }
-
-            investment.validateInvestmentAmount(evaluation.investmentAmount);
-            await panel.addLoan();
 
             if (ruleInvestmentAmount === undefined) {
               ruleInvestmentAmount = evaluation.investmentAmount;
-              logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
+            } else if (ruleInvestmentAmount !== evaluation.investmentAmount) {
+              throw new Error(
+                `Rule ${rule} returned inconsistent investment amounts: ₹${ruleInvestmentAmount} and ₹${evaluation.investmentAmount}`,
+              );
             }
 
-            investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
+            investment.assertCanInvest(evaluation.investmentAmount);
+            await panel.addLoan();
+            investment.reserve(evaluation.investmentAmount);
             selectedLoanIds.add(borrower.loanId);
             invested += 1;
             ruleInvested += 1;
-
             records.push({
               rule,
-              loanId: borrower.loanId,
               borrowerName: borrower.name,
+              loanId: borrower.loanId,
               status: 'SELECTED',
-              evaluation,
-              investmentAmount: evaluation.investmentAmount,
+              amount: evaluation.investmentAmount,
+              reason: evaluation.reason ?? undefined,
             });
-
             await panel.close();
           } catch (error) {
             if (this.isRuleEvaluationFailure(error)) {
@@ -278,25 +240,12 @@ export class LendingWorkflowService {
         failed += 1;
         logger.error(`Rule ${rule} failed: ${reason}`);
         await captureFailure(this.page, `rule-${rule}`);
-
-        if (error instanceof UncertainFinancialStateError) {
-          logger.error('Stopping workflow because the financial result is uncertain');
-          throw error;
-        }
-
-        try {
-          await ui.closeOpenModalIfPresent();
-          logger.info(`UI cleanup completed after rule failure: ${rule}`);
-        } catch (cleanupError) {
-          const cleanupReason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-          logger.warn(`UI cleanup failed after rule ${rule}: ${cleanupReason}`);
-        }
+        if (error instanceof UncertainFinancialStateError) throw error;
       }
     }
 
     const report: ExecutionReport = {
       sessionId: lenderData.sessionId,
-      lenderId: lenderData.lender.lenderId,
       lenderName: lenderData.lender.name,
       initialWallet: lenderData.lender.walletAmount,
       finalWallet: investment.remainingWallet,
@@ -337,10 +286,12 @@ export class LendingWorkflowService {
     const loginUiVisible = await this.page.locator('#otp, input[type="tel"]').first().isVisible().catch(() => false);
 
     if (redirectedToLogin || loginUiVisible) {
-      throw new Error('Saved LenDenClub session is missing or expired. Run: npm run auth');
+      throw new Error(
+        `Saved LenDenClub session for username ${config.username} is missing or expired. Run: $env:LENDER_USERNAME='${config.username}'; npm run auth`,
+      );
     }
 
-    logger.info('Reused saved LenDenClub authenticated session');
+    logger.info(`Reused saved LenDenClub authenticated session for username=${config.username}`);
   }
 
   private isRuleEvaluationFailure(error: unknown): error is ApiError {
@@ -359,24 +310,5 @@ export class LendingWorkflowService {
       return `${message}${correlationId}`;
     }
     return error.message;
-  }
-
-  private validateEvaluationIdentity(
-    evaluation: EvaluationResponse,
-    borrower: Borrower,
-    sessionId: string,
-    rule: string,
-  ): void {
-    if (evaluation.loanId.trim() !== borrower.loanId.trim()) {
-      throw new Error(`Evaluation loan mismatch: expected ${borrower.loanId}, got ${evaluation.loanId}`);
-    }
-
-    if (evaluation.sessionId.trim() !== sessionId.trim()) {
-      throw new Error(`Evaluation session mismatch: expected ${sessionId}, got ${evaluation.sessionId}`);
-    }
-
-    if (evaluation.rule !== null && evaluation.rule.trim().toUpperCase() !== rule.trim().toUpperCase()) {
-      throw new Error(`Evaluation rule mismatch: expected ${rule}, got ${evaluation.rule}`);
-    }
   }
 }
