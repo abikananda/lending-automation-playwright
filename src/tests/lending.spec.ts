@@ -1,20 +1,21 @@
 import { existsSync } from 'node:fs';
-import path from 'node:path';
 import { test } from '@playwright/test';
+import { config } from '../config/Config';
+import { runPaths } from '../config/RunPaths';
 import { LendingWorkflowService } from '../services/LendingWorkflowService';
 
-const authStatePath = path.resolve('playwright/.auth/lender.json');
+const authStatePath = runPaths.authState;
 
-// Reuse a previously authenticated browser state during development.
-// If the file is missing, start with an empty state and let the workflow fail with a clear npm run auth message.
+// Each lender owns a separate browser storage state, allowing independent parallel processes.
+// If the file is missing, start empty and let the workflow fail with a lender-specific auth command.
 test.use({
   storageState: existsSync(authStatePath)
     ? authStatePath
     : { cookies: [], origins: [] },
 });
 
-// Sequential by design: this workflow performs real financial actions.
-test('execute LenDenClub lending workflow', async ({ page }) => {
+// Sequential inside one process by design; separate lender processes may run in parallel.
+test(`execute LenDenClub lending workflow for ${config.lenderId}`, async ({ page }) => {
   const workflow = new LendingWorkflowService(page);
   await workflow.execute();
 });
