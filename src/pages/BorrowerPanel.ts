@@ -19,21 +19,30 @@ export class BorrowerPanel {
   }
 
   private async read(label: string, required = true): Promise<string | undefined> {
-    const value = (await this.field(label).innerText()).trim();
+    const locator = this.field(label);
+    if ((await locator.count()) === 0) {
+      if (required) throw new Error(`Missing borrower field: ${label}`);
+      return undefined;
+    }
+
+    const value = (await locator.innerText()).trim();
     if (!value && required) throw new Error(`Missing borrower field: ${label}`);
     return value || undefined;
   }
 
   async extractBorrower(): Promise<Borrower> {
-    const risk = await this.readPanelFields('Risk Category & Score', ['Bureau Score', 'LenDenClub Score']);
+    const risk = await this.readPanelFields(
+      'Risk Category & Score',
+      ['Bureau Score', 'LenDenClub Score', 'Risk Category'],
+      false,
+    );
     const professional = await this.readPanelFields('Professional Details', ['Occupation', 'Monthly Income']);
-    const personal = await this.readPanelFields('Personal Details', ['Name', 'Age']);
-    const loan = await this.readPanelFields('Loan Details', [
-      'Loan ID',
-      'Loan Amount',
-      'Tenure',
-      'Annualized Interest Rate',
-    ], false);
+    const personal = await this.readPanelFields('Personal', ['Name', 'Age', 'Gender'], false);
+    const loan = await this.readPanelFields(
+      'Loan',
+      ['Loan ID', 'Loan Amount', 'Tenure', 'Annualized Interest Rate', 'Type', 'Repayment Frequency'],
+      false,
+    );
 
     const borrower: Borrower = {
       loanId: (loan['Loan ID'] ?? '').trim(),
@@ -48,12 +57,23 @@ export class BorrowerPanel {
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,
       name: (personal.Name ?? '').trim(),
+      loanType: loan.Type?.trim(),
+      repaymentFrequency: loan['Repayment Frequency']?.trim(),
+      gender: personal.Gender?.trim(),
+      riskCategory: risk['Risk Category']?.trim(),
     };
 
     if (!borrower.loanId) throw new Error('Missing borrower field: Loan ID');
     if (!borrower.name) throw new Error('Missing borrower field: Name');
 
-    logger.debug(`Borrower extracted: ${borrower.loanId}`);
+    logger.debug(
+      `Borrower extracted: ${borrower.loanId} additionalFields=${JSON.stringify({
+        loanType: borrower.loanType,
+        repaymentFrequency: borrower.repaymentFrequency,
+        gender: borrower.gender,
+        riskCategory: borrower.riskCategory,
+      })}`,
+    );
     return borrower;
   }
 

@@ -75,6 +75,17 @@ playwright-report/abikananda/
 test-results/abikananda/
 ```
 
+## Borrower panel data
+
+The borrower extractor reads the existing evaluation fields plus these confirmed additional UI fields:
+
+- Loan Details -> Loan Type
+- Loan Details -> Repayment Frequency
+- Personal Details -> Gender
+- Risk Category & Score -> Risk Category
+
+These additional fields are sent to the backend for persistence only. They do not change Drools evaluation or investment decisions.
+
 ## Safety
 
 - Playwright does not read or write MySQL directly.

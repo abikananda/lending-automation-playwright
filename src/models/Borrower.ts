@@ -18,4 +18,8 @@ export interface Borrower {
   trusted?: boolean;
   name: string;
   lendingAmount?: number;
+  loanType?: string;
+  repaymentFrequency?: string;
+  gender?: string;
+  riskCategory?: string;
 }

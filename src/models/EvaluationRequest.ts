@@ -3,6 +3,7 @@ import type { Borrower } from './Borrower';
 export interface EvaluationRequest {
   sessionId: string;
   loanId: string;
+  borrowerName: string;
   creditScore: number;
   lendenScore: number;
   income: number;
@@ -13,12 +14,17 @@ export interface EvaluationRequest {
   age: number;
   borrowerType: string;
   repeated: boolean;
+  loanType?: string;
+  repaymentFrequency?: string;
+  gender?: string;
+  riskCategory?: string;
 }
 
 export function toEvaluationRequest(sessionId: string, borrower: Borrower): EvaluationRequest {
   return {
     sessionId,
     loanId: borrower.loanId,
+    borrowerName: borrower.name,
     creditScore: borrower.creditScore,
     lendenScore: borrower.lendenScore,
     income: borrower.income,
@@ -29,5 +35,9 @@ export function toEvaluationRequest(sessionId: string, borrower: Borrower): Eval
     age: borrower.age,
     borrowerType: borrower.borrowerType,
     repeated: borrower.repeated,
+    loanType: borrower.loanType,
+    repaymentFrequency: borrower.repaymentFrequency,
+    gender: borrower.gender,
+    riskCategory: borrower.riskCategory,
   };
 }
