@@ -28,6 +28,7 @@ function optional(name: string): string | undefined {
 export const config = {
   lendenClubUrl: required('LENDENCLUB_URL', 'https://app.lendenclub.com'),
   backendUrl: required('BACKEND_URL', 'http://localhost:8080'),
+  lenderId: required('LENDER_ID'),
   backendApiKey: optional('BACKEND_API_KEY'),
   backendAuthHeader: required('BACKEND_AUTH_HEADER', 'X-API-Key'),
   headless: boolEnv('HEADLESS', false),
