@@ -81,109 +81,168 @@ export class LendingWorkflowService {
 
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
-        const borrowers = await ui.getBorrowers();
-        totalBorrowers += borrowers.length;
-        logger.info(`Borrowers found for ${rule}: ${borrowers.length}`);
 
-        for (const summary of borrowers) {
-          if (!summary.name) continue;
+        // LenDenClub virtualizes the borrower list. Cards discovered after scrolling may be
+        // removed from the DOM when the viewport moves, so collecting every name first and
+        // reopening it later causes large numbers of visibility timeouts. Process each card
+        // while it is currently rendered instead.
+        const processedBorrowerNames = new Set<string>();
+        const maxConsecutiveNoNewBorrowers = 3;
+        let consecutiveNoNewBorrowers = 0;
+        let traversalPass = 0;
 
-          let panel;
-          try {
-            panel = await ui.openBorrowerByName(summary.name);
-            const borrower = await panel.extractBorrower();
-            borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
-            ruleParsedBorrowers += 1;
-            logger.info(`Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`);
+        while (consecutiveNoNewBorrowers < maxConsecutiveNoNewBorrowers) {
+          traversalPass += 1;
+          this.throwIfBrowserClosed();
 
-            const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
-            this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
-            evaluated += 1;
+          const visibleNames = await this.getVisibleBorrowerNames(ui);
+          const newNames = visibleNames.filter((name) => !processedBorrowerNames.has(name));
 
-            if (evaluation.decision === null || evaluation.decision.toUpperCase() !== 'INVEST') {
-              skipped += 1;
+          if (newNames.length === 0) {
+            consecutiveNoNewBorrowers += 1;
+            logger.info(
+              `No new rendered borrowers for ${rule} on traversal ${traversalPass} (${consecutiveNoNewBorrowers}/${maxConsecutiveNoNewBorrowers})`,
+            );
+          } else {
+            consecutiveNoNewBorrowers = 0;
+            logger.info(
+              `Processing ${newNames.length} newly rendered borrower(s) for ${rule} on traversal ${traversalPass}`,
+            );
+          }
+
+          for (const borrowerName of newNames) {
+            processedBorrowerNames.add(borrowerName);
+
+            let panel;
+            try {
+              this.throwIfBrowserClosed();
+              panel = await ui.openBorrowerByName(borrowerName);
+              const borrower = await panel.extractBorrower();
+              borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
+              ruleParsedBorrowers += 1;
+              logger.info(
+                `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
+              );
+
+              const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
+              this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
+              evaluated += 1;
+
+              if (evaluation.decision === null || evaluation.decision.toUpperCase() !== 'INVEST') {
+                skipped += 1;
+                records.push({
+                  rule,
+                  loanId: borrower.loanId,
+                  borrowerName: borrower.name,
+                  status: 'SKIPPED',
+                  reason: evaluation.reason ?? 'Evaluation did not select borrower for investment',
+                  evaluation,
+                });
+                await panel.close();
+                continue;
+              }
+
+              const npaBorrower = npaBorrowersByName.get(this.normalizeBorrowerName(borrower.name));
+              if (npaBorrower) {
+                skipped += 1;
+                const reason = `NPA borrower matched; investment blocked (NPA id=${npaBorrower.id})`;
+                logger.warn(
+                  `NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`,
+                );
+                try {
+                  await this.npaBorrowerApi.recordHit(npaBorrower.id, lenderData.sessionId, borrower.loanId);
+                } catch (error) {
+                  logger.error(
+                    `NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                }
+                records.push({
+                  rule,
+                  loanId: borrower.loanId,
+                  borrowerName: borrower.name,
+                  status: 'SKIPPED',
+                  reason,
+                  evaluation,
+                });
+                await panel.close();
+                continue;
+              }
+
+              if (selectedLoanIds.has(borrower.loanId)) {
+                skipped += 1;
+                const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
+                logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
+                records.push({
+                  rule,
+                  loanId: borrower.loanId,
+                  borrowerName: borrower.name,
+                  status: 'SKIPPED',
+                  reason,
+                  evaluation,
+                });
+                await panel.close();
+                continue;
+              }
+
+              if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
+                throw new Error(
+                  `Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`,
+                );
+              }
+
+              investment.validateInvestmentAmount(evaluation.investmentAmount);
+              await panel.addLoan();
+
+              if (ruleInvestmentAmount === undefined) {
+                ruleInvestmentAmount = evaluation.investmentAmount;
+                logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
+              }
+
+              investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
+              selectedLoanIds.add(borrower.loanId);
+              invested += 1;
+              ruleInvested += 1;
               records.push({
                 rule,
                 loanId: borrower.loanId,
                 borrowerName: borrower.name,
-                status: 'SKIPPED',
-                reason: evaluation.reason ?? 'Evaluation did not select borrower for investment',
+                status: 'SELECTED',
                 evaluation,
+                investmentAmount: evaluation.investmentAmount,
               });
               await panel.close();
-              continue;
-            }
+            } catch (error) {
+              if (this.isFatalBrowserError(error)) throw error;
 
-            const npaBorrower = npaBorrowersByName.get(this.normalizeBorrowerName(borrower.name));
-            if (npaBorrower) {
-              skipped += 1;
-              const reason = `NPA borrower matched; investment blocked (NPA id=${npaBorrower.id})`;
-              logger.warn(`NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`);
-              try {
-                await this.npaBorrowerApi.recordHit(npaBorrower.id, lenderData.sessionId, borrower.loanId);
-              } catch (error) {
-                logger.error(`NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`);
+              if (this.isRuleEvaluationFailure(error)) {
+                skipped += 1;
+                const reason = this.ruleEvaluationFailureReason(error);
+                records.push({ rule, borrowerName, status: 'SKIPPED', reason });
+                logger.warn(`Skipping borrower after backend rule failure: ${borrowerName}: ${reason}`);
+                if (panel) await panel.close().catch(() => undefined);
+                continue;
               }
-              records.push({ rule, loanId: borrower.loanId, borrowerName: borrower.name, status: 'SKIPPED', reason, evaluation });
-              await panel.close();
-              continue;
-            }
 
-            if (selectedLoanIds.has(borrower.loanId)) {
-              skipped += 1;
-              const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
-              logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
-              records.push({ rule, loanId: borrower.loanId, borrowerName: borrower.name, status: 'SKIPPED', reason, evaluation });
-              await panel.close();
-              continue;
-            }
-
-            if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
-              throw new Error(`Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`);
-            }
-
-            investment.validateInvestmentAmount(evaluation.investmentAmount);
-            await panel.addLoan();
-
-            if (ruleInvestmentAmount === undefined) {
-              ruleInvestmentAmount = evaluation.investmentAmount;
-              logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
-            }
-
-            investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
-            selectedLoanIds.add(borrower.loanId);
-            invested += 1;
-            ruleInvested += 1;
-            records.push({
-              rule,
-              loanId: borrower.loanId,
-              borrowerName: borrower.name,
-              status: 'SELECTED',
-              evaluation,
-              investmentAmount: evaluation.investmentAmount,
-            });
-            await panel.close();
-          } catch (error) {
-            if (this.isRuleEvaluationFailure(error)) {
-              skipped += 1;
-              const reason = this.ruleEvaluationFailureReason(error);
-              records.push({ rule, borrowerName: summary.name, status: 'SKIPPED', reason });
-              logger.warn(`Skipping borrower after backend rule failure: ${summary.name}: ${reason}`);
+              failed += 1;
+              ruleBorrowerFailures += 1;
+              const reason = error instanceof Error ? error.message : String(error);
+              errors.push(`${rule}/${borrowerName}: ${reason}`);
+              records.push({ rule, borrowerName, status: 'FAILED', reason });
+              logger.error(`Borrower failed: ${borrowerName}: ${reason}`);
               if (panel) await panel.close().catch(() => undefined);
-              continue;
             }
+          }
 
-            failed += 1;
-            ruleBorrowerFailures += 1;
-            const reason = error instanceof Error ? error.message : String(error);
-            errors.push(`${rule}/${summary.name}: ${reason}`);
-            records.push({ rule, borrowerName: summary.name, status: 'FAILED', reason });
-            logger.error(`Borrower failed: ${summary.name}: ${reason}`);
-            if (panel) await panel.close().catch(() => undefined);
+          if (consecutiveNoNewBorrowers < maxConsecutiveNoNewBorrowers) {
+            this.throwIfBrowserClosed();
+            await ui.scrollToLoadMoreCards();
           }
         }
 
-        logger.info(`Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully`);
+        totalBorrowers += processedBorrowerNames.size;
+        logger.info(
+          `Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully from ${processedBorrowerNames.size} discovered borrower(s)`,
+        );
 
         if (ruleBorrowerFailures > 0) {
           logger.error(`Rule ${rule} completed with ${ruleBorrowerFailures} borrower failure(s)`);
@@ -191,13 +250,19 @@ export class LendingWorkflowService {
         }
 
         if (ruleInvested > 0) {
-          if (ruleInvestmentAmount === undefined) throw new Error(`Missing investment amount for rule ${rule} despite ${ruleInvested} selected loan(s)`);
+          if (ruleInvestmentAmount === undefined) {
+            throw new Error(`Missing investment amount for rule ${rule} despite ${ruleInvested} selected loan(s)`);
+          }
+          this.throwIfBrowserClosed();
           await ui.setInvestmentAmount(ruleInvestmentAmount);
           await ui.clickContinue();
           try {
             await ui.validateSuccess();
           } catch (error) {
-            throw new UncertainFinancialStateError(`Continue was clicked for rule ${rule}, but lending success could not be confirmed. Workflow stopped to avoid a duplicate financial action.`, { cause: error });
+            throw new UncertainFinancialStateError(
+              `Continue was clicked for rule ${rule}, but lending success could not be confirmed. Workflow stopped to avoid a duplicate financial action.`,
+              { cause: error },
+            );
           }
           for (const record of records) {
             if (record.rule === rule && record.status === 'SELECTED') record.status = 'FINALIZED';
@@ -206,6 +271,13 @@ export class LendingWorkflowService {
           await ui.goDashboard();
         }
       } catch (error) {
+        if (this.isFatalBrowserError(error)) {
+          logger.error(
+            `Fatal browser failure during rule ${rule}; workflow aborted and backend session will not be marked COMPLETED: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          throw error;
+        }
+
         const reason = error instanceof Error ? error.message : String(error);
         errors.push(`${rule}: ${reason}`);
         failed += 1;
@@ -215,7 +287,9 @@ export class LendingWorkflowService {
         try {
           await ui.closeOpenModalIfPresent();
         } catch (cleanupError) {
-          logger.warn(`UI cleanup failed after rule ${rule}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+          logger.warn(
+            `UI cleanup failed after rule ${rule}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
         }
       }
     }
@@ -241,10 +315,49 @@ export class LendingWorkflowService {
     try {
       await this.lenderApi.completeSession(lenderData.sessionId);
     } catch (error) {
-      logger.error(`Workflow finished but backend session completion failed for ${lenderData.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      logger.error(
+        `Workflow finished but backend session completion failed for ${lenderData.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
+  }
+
+  private async getVisibleBorrowerNames(ui: ManualLendingPage): Promise<string[]> {
+    const cards = await ui.getCardLocator();
+    const count = await cards.count();
+    const names: string[] = [];
+
+    for (let i = 0; i < count; i += 1) {
+      const card = cards.nth(i);
+      if (!(await card.isVisible().catch(() => false))) continue;
+
+      const name = (
+        await card
+          .locator('div.css-69i1ev p.MuiTypography-root')
+          .first()
+          .innerText()
+          .catch(async () => card.locator("xpath=.//div[contains(@class,'css-69i1ev')]//p[1]").innerText())
+      ).trim();
+
+      if (name) names.push(name);
+    }
+
+    return names;
+  }
+
+  private throwIfBrowserClosed(): void {
+    if (this.page.isClosed()) {
+      throw new Error('Playwright page is closed; aborting lending workflow');
+    }
+  }
+
+  private isFatalBrowserError(error: unknown): boolean {
+    if (this.page.isClosed()) return true;
+    const message = error instanceof Error ? error.message : String(error);
+    return /target page, context or browser has been closed|test timeout of \d+ms exceeded|playwright page is closed/i.test(
+      message,
+    );
   }
 
   private normalizeBorrowerName(name: string): string {
@@ -255,17 +368,30 @@ export class LendingWorkflowService {
     await this.page.goto(`${config.lendenClubUrl}/manual-lending`, { waitUntil: 'domcontentloaded' });
     const currentUrl = this.page.url();
     const redirectedToLogin = /\/login(?:[/?#]|$)/i.test(currentUrl);
-    const loginUiVisible = await this.page.locator('#otp, input[type="tel"]').first().isVisible().catch(() => false);
+    const loginUiVisible = await this.page
+      .locator('#otp, input[type="tel"]')
+      .first()
+      .isVisible()
+      .catch(() => false);
 
     if (redirectedToLogin || loginUiVisible) {
-      throw new Error(`Saved LenDenClub session for username ${config.username} is missing or expired. Run: $env:LENDER_USERNAME='${config.username}'; npm run auth`);
+      throw new Error(
+        `Saved LenDenClub session for username ${config.username} is missing or expired. Run: $env:LENDER_USERNAME='${config.username}'; npm run auth`,
+      );
     }
 
     logger.info(`Reused saved LenDenClub authenticated session for username=${config.username}`);
   }
 
   private isRuleEvaluationFailure(error: unknown): error is ApiError {
-    if (!(error instanceof ApiError) || error.status !== 422 || typeof error.responseBody !== 'object' || error.responseBody === null) return false;
+    if (
+      !(error instanceof ApiError) ||
+      error.status !== 422 ||
+      typeof error.responseBody !== 'object' ||
+      error.responseBody === null
+    ) {
+      return false;
+    }
     return (error.responseBody as { error?: unknown }).error === 'RULE_EVALUATION_FAILED';
   }
 
@@ -279,9 +405,18 @@ export class LendingWorkflowService {
     return error.message;
   }
 
-  private validateEvaluationIdentity(evaluation: EvaluationResponse, borrower: Borrower, sessionId: string, rule: string): void {
-    if (evaluation.loanId.trim() !== borrower.loanId.trim()) throw new Error(`Evaluation loan mismatch: expected ${borrower.loanId}, got ${evaluation.loanId}`);
-    if (evaluation.sessionId.trim() !== sessionId.trim()) throw new Error(`Evaluation session mismatch: expected ${sessionId}, got ${evaluation.sessionId}`);
+  private validateEvaluationIdentity(
+    evaluation: EvaluationResponse,
+    borrower: Borrower,
+    sessionId: string,
+    rule: string,
+  ): void {
+    if (evaluation.loanId.trim() !== borrower.loanId.trim()) {
+      throw new Error(`Evaluation loan mismatch: expected ${borrower.loanId}, got ${evaluation.loanId}`);
+    }
+    if (evaluation.sessionId.trim() !== sessionId.trim()) {
+      throw new Error(`Evaluation session mismatch: expected ${sessionId}, got ${evaluation.sessionId}`);
+    }
     if (evaluation.rule !== null && evaluation.rule.trim().toUpperCase() !== rule.trim().toUpperCase()) {
       throw new Error(`Evaluation rule mismatch: expected ${rule}, got ${evaluation.rule}`);
     }
