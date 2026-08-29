@@ -5,13 +5,15 @@ import { logger } from '../utils/Logger';
 
 export class BorrowerPanel {
   private readonly panel: Locator;
+  private static readonly PANEL_OPEN_TIMEOUT_MS = 5_000;
+  private static readonly ADD_LOAN_CONFIRM_TIMEOUT_MS = 5_000;
 
   constructor(private readonly page: Page) {
     this.panel = page.locator('div.sc-dtBdUo.hHvdph');
   }
 
   async waitForOpen(): Promise<void> {
-    await expect(this.panel).toBeVisible();
+    await expect(this.panel).toBeVisible({ timeout: BorrowerPanel.PANEL_OPEN_TIMEOUT_MS });
   }
 
   private field(label: string): Locator {
@@ -114,11 +116,25 @@ export class BorrowerPanel {
   async addLoan(): Promise<void> {
     const button = this.panel.getByRole('button', { name: 'Add Loan', exact: true });
     await expect(button).toBeEnabled();
+
+    // Financial action: click exactly once. Never retry this click automatically.
     await button.click();
 
-    // A click is not treated as success. Require a UI state change.
-    await expect(button).toBeDisabled().catch(async () => {
-      await expect(button).toHaveCount(0).catch(() => undefined);
-    });
+    // Confirm the click caused one of the known successful UI transitions without
+    // first waiting the global 30s timeout for a state that may never occur.
+    await expect
+      .poll(
+        async () => {
+          if ((await button.count()) === 0) return true;
+          if (!(await this.panel.isVisible().catch(() => false))) return true;
+          return button.isDisabled().catch(() => false);
+        },
+        {
+          timeout: BorrowerPanel.ADD_LOAN_CONFIRM_TIMEOUT_MS,
+          intervals: [100, 250, 500],
+          message: 'Add Loan click did not produce a confirmed UI state change',
+        },
+      )
+      .toBe(true);
   }
 }
