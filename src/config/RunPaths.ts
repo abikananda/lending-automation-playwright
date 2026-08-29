@@ -7,6 +7,7 @@ function safeUsername(): string {
 
 export const runPaths = {
   authState: path.resolve('playwright/.auth', `${safeUsername()}.json`),
+  authSessionStorage: path.resolve('playwright/.auth', `${safeUsername()}.session-storage.json`),
   testResults: path.resolve('test-results', safeUsername()),
   htmlReport: path.resolve('playwright-report', safeUsername()),
 } as const;

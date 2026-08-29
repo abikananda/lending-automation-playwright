@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { test } from '@playwright/test';
 import { config } from '../config/Config';
 import { runPaths } from '../config/RunPaths';
@@ -13,6 +14,36 @@ test.use({
   storageState: existsSync(authStatePath)
     ? authStatePath
     : { cookies: [], origins: [] },
+});
+
+test.beforeEach(async ({ context }) => {
+  if (!existsSync(runPaths.authSessionStorage)) return;
+
+  const saved = JSON.parse(await readFile(runPaths.authSessionStorage, 'utf8')) as {
+    origin: string;
+    entries: Record<string, string>;
+  };
+
+  const expectedOrigin = new URL(config.lendenClubUrl).origin;
+  if (saved.origin !== expectedOrigin) {
+    throw new Error(
+      `Saved LenDenClub sessionStorage origin mismatch: expected ${expectedOrigin}, got ${saved.origin}. ` +
+        `Run: $env:LENDER_USERNAME='${config.username}'; npm run auth`,
+    );
+  }
+
+  // Playwright storageState does not include sessionStorage. Install it before the
+  // first LenDenClub navigation so the app sees the same session-scoped values as
+  // the authenticated browser that produced the saved state.
+  await context.addInitScript(
+    ({ origin, entries }) => {
+      if (window.location.origin !== origin) return;
+      for (const [key, value] of Object.entries(entries)) {
+        window.sessionStorage.setItem(key, value);
+      }
+    },
+    { origin: saved.origin, entries: saved.entries },
+  );
 });
 
 // Sequential inside one process by design; separate username processes may run in parallel.
