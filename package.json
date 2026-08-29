@@ -6,6 +6,7 @@
   "scripts": {
     "auth": "playwright test src/tests/auth.setup.spec.ts",
     "test": "playwright test src/tests/lending.spec.ts",
+    "test:unit": "playwright test --config=playwright.unit.config.ts",
     "test:headed": "cross-env HEADLESS=false playwright test src/tests/lending.spec.ts",
     "test:debug": "cross-env PWDEBUG=1 playwright test src/tests/lending.spec.ts",
     "build": "tsc --noEmit",
