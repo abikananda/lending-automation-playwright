@@ -1,4 +1,5 @@
-import type { Page } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { expect, type Locator, type Page } from '@playwright/test';
 import { ApiError } from '../api/BaseApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
 import { HealthApiClient } from '../api/HealthApiClient';
@@ -10,6 +11,7 @@ import type { Borrower } from '../models/Borrower';
 import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
 import type { NpaBorrower } from '../models/NpaBorrower';
+import { BorrowerPanel } from '../pages/BorrowerPanel';
 import { ManualLendingPage } from '../pages/ManualLendingPage';
 import { captureFailure } from '../utils/ScreenshotUtils';
 import { logger } from '../utils/Logger';
@@ -23,6 +25,15 @@ class UncertainFinancialStateError extends Error {
     super(message, options);
     this.name = 'UncertainFinancialStateError';
   }
+}
+
+interface VisibleBorrowerCard {
+  hash: string;
+  name: string;
+  loanAmount: string;
+  tenure: string;
+  apr: string;
+  card: Locator;
 }
 
 export class LendingWorkflowService {
@@ -82,11 +93,11 @@ export class LendingWorkflowService {
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
 
-        // LenDenClub virtualizes the borrower list. Cards discovered after scrolling may be
-        // removed from the DOM when the viewport moves, so collecting every name first and
-        // reopening it later causes large numbers of visibility timeouts. Process each card
-        // while it is currently rendered instead.
-        const processedBorrowerNames = new Set<string>();
+        // LenDenClub virtualizes the borrower list. Opening/closing a borrower can rerender
+        // mounted cards, so process exactly one currently rendered card and then re-query.
+        // Name alone is not unique; traversal identity is SHA-256(name + loan amount + tenure + APR).
+        // The extracted loanId remains the authoritative financial duplicate guard.
+        const processedBorrowerHashes = new Set<string>();
         const maxConsecutiveNoNewBorrowers = 3;
         let consecutiveNoNewBorrowers = 0;
         let traversalPass = 0;
@@ -95,153 +106,151 @@ export class LendingWorkflowService {
           traversalPass += 1;
           this.throwIfBrowserClosed();
 
-          const visibleNames = await this.getVisibleBorrowerNames(ui);
-          const newNames = visibleNames.filter((name) => !processedBorrowerNames.has(name));
+          const visibleBorrower = await this.getNextVisibleBorrowerCard(ui, processedBorrowerHashes);
 
-          if (newNames.length === 0) {
+          if (!visibleBorrower) {
             consecutiveNoNewBorrowers += 1;
             logger.info(
               `No new rendered borrowers for ${rule} on traversal ${traversalPass} (${consecutiveNoNewBorrowers}/${maxConsecutiveNoNewBorrowers})`,
             );
-          } else {
-            consecutiveNoNewBorrowers = 0;
-            logger.info(
-              `Processing ${newNames.length} newly rendered borrower(s) for ${rule} on traversal ${traversalPass}`,
-            );
+
+            if (consecutiveNoNewBorrowers < maxConsecutiveNoNewBorrowers) {
+              this.throwIfBrowserClosed();
+              await ui.scrollToLoadMoreCards();
+            }
+            continue;
           }
 
-          for (const borrowerName of newNames) {
-            processedBorrowerNames.add(borrowerName);
+          consecutiveNoNewBorrowers = 0;
+          processedBorrowerHashes.add(visibleBorrower.hash);
+          const borrowerName = visibleBorrower.name;
+          logger.debug(
+            `Processing currently rendered borrower for ${rule} on traversal ${traversalPass}: ${borrowerName} fingerprint=${visibleBorrower.hash.slice(0, 12)} loanAmount=${visibleBorrower.loanAmount} tenure=${visibleBorrower.tenure} apr=${visibleBorrower.apr}`,
+          );
 
-            let panel;
-            try {
-              this.throwIfBrowserClosed();
-              panel = await ui.openBorrowerByName(borrowerName);
-              const borrower = await panel.extractBorrower();
-              borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
-              ruleParsedBorrowers += 1;
-              logger.info(
-                `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
-              );
+          let panel;
+          try {
+            this.throwIfBrowserClosed();
+            panel = await this.openBorrowerCard(visibleBorrower.card);
+            const borrower = await panel.extractBorrower();
+            borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
+            ruleParsedBorrowers += 1;
+            logger.info(
+              `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
+            );
 
-              const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
-              this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
-              evaluated += 1;
+            const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
+            this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
+            evaluated += 1;
 
-              if (evaluation.decision === null || evaluation.decision.toUpperCase() !== 'INVEST') {
-                skipped += 1;
-                records.push({
-                  rule,
-                  loanId: borrower.loanId,
-                  borrowerName: borrower.name,
-                  status: 'SKIPPED',
-                  reason: evaluation.reason ?? 'Evaluation did not select borrower for investment',
-                  evaluation,
-                });
-                await panel.close();
-                continue;
-              }
-
-              const npaBorrower = npaBorrowersByName.get(this.normalizeBorrowerName(borrower.name));
-              if (npaBorrower) {
-                skipped += 1;
-                const reason = `NPA borrower matched; investment blocked (NPA id=${npaBorrower.id})`;
-                logger.warn(
-                  `NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`,
-                );
-                try {
-                  await this.npaBorrowerApi.recordHit(npaBorrower.id, lenderData.sessionId, borrower.loanId);
-                } catch (error) {
-                  logger.error(
-                    `NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                }
-                records.push({
-                  rule,
-                  loanId: borrower.loanId,
-                  borrowerName: borrower.name,
-                  status: 'SKIPPED',
-                  reason,
-                  evaluation,
-                });
-                await panel.close();
-                continue;
-              }
-
-              if (selectedLoanIds.has(borrower.loanId)) {
-                skipped += 1;
-                const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
-                logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
-                records.push({
-                  rule,
-                  loanId: borrower.loanId,
-                  borrowerName: borrower.name,
-                  status: 'SKIPPED',
-                  reason,
-                  evaluation,
-                });
-                await panel.close();
-                continue;
-              }
-
-              if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
-                throw new Error(
-                  `Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`,
-                );
-              }
-
-              investment.validateInvestmentAmount(evaluation.investmentAmount);
-              await panel.addLoan();
-
-              if (ruleInvestmentAmount === undefined) {
-                ruleInvestmentAmount = evaluation.investmentAmount;
-                logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
-              }
-
-              investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
-              selectedLoanIds.add(borrower.loanId);
-              invested += 1;
-              ruleInvested += 1;
+            if (evaluation.decision === null || evaluation.decision.toUpperCase() !== 'INVEST') {
+              skipped += 1;
               records.push({
                 rule,
                 loanId: borrower.loanId,
                 borrowerName: borrower.name,
-                status: 'SELECTED',
+                status: 'SKIPPED',
+                reason: evaluation.reason ?? 'Evaluation did not select borrower for investment',
                 evaluation,
-                investmentAmount: evaluation.investmentAmount,
               });
               await panel.close();
-            } catch (error) {
-              if (this.isFatalBrowserError(error)) throw error;
-
-              if (this.isRuleEvaluationFailure(error)) {
-                skipped += 1;
-                const reason = this.ruleEvaluationFailureReason(error);
-                records.push({ rule, borrowerName, status: 'SKIPPED', reason });
-                logger.warn(`Skipping borrower after backend rule failure: ${borrowerName}: ${reason}`);
-                if (panel) await panel.close().catch(() => undefined);
-                continue;
-              }
-
-              failed += 1;
-              ruleBorrowerFailures += 1;
-              const reason = error instanceof Error ? error.message : String(error);
-              errors.push(`${rule}/${borrowerName}: ${reason}`);
-              records.push({ rule, borrowerName, status: 'FAILED', reason });
-              logger.error(`Borrower failed: ${borrowerName}: ${reason}`);
-              if (panel) await panel.close().catch(() => undefined);
+              continue;
             }
-          }
 
-          if (consecutiveNoNewBorrowers < maxConsecutiveNoNewBorrowers) {
-            this.throwIfBrowserClosed();
-            await ui.scrollToLoadMoreCards();
+            const npaBorrower = npaBorrowersByName.get(this.normalizeBorrowerName(borrower.name));
+            if (npaBorrower) {
+              skipped += 1;
+              const reason = `NPA borrower matched; investment blocked (NPA id=${npaBorrower.id})`;
+              logger.warn(
+                `NPA BLOCK borrower=${borrower.name} loanId=${borrower.loanId} npaId=${npaBorrower.id}`,
+              );
+              try {
+                await this.npaBorrowerApi.recordHit(npaBorrower.id, lenderData.sessionId, borrower.loanId);
+              } catch (error) {
+                logger.error(
+                  `NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+              records.push({
+                rule,
+                loanId: borrower.loanId,
+                borrowerName: borrower.name,
+                status: 'SKIPPED',
+                reason,
+                evaluation,
+              });
+              await panel.close();
+              continue;
+            }
+
+            if (selectedLoanIds.has(borrower.loanId)) {
+              skipped += 1;
+              const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
+              logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
+              records.push({
+                rule,
+                loanId: borrower.loanId,
+                borrowerName: borrower.name,
+                status: 'SKIPPED',
+                reason,
+                evaluation,
+              });
+              await panel.close();
+              continue;
+            }
+
+            if (ruleInvestmentAmount !== undefined && ruleInvestmentAmount !== evaluation.investmentAmount) {
+              throw new Error(
+                `Inconsistent investment amount for rule ${rule}: expected ₹${ruleInvestmentAmount}, got ₹${evaluation.investmentAmount} for loan ${borrower.loanId}`,
+              );
+            }
+
+            investment.validateInvestmentAmount(evaluation.investmentAmount);
+            await panel.addLoan();
+
+            if (ruleInvestmentAmount === undefined) {
+              ruleInvestmentAmount = evaluation.investmentAmount;
+              logger.info(`Rule ${rule} investment amount established at ₹${ruleInvestmentAmount}`);
+            }
+
+            investment.reserveAfterSuccessfulAddLoan(evaluation.investmentAmount);
+            selectedLoanIds.add(borrower.loanId);
+            invested += 1;
+            ruleInvested += 1;
+            records.push({
+              rule,
+              loanId: borrower.loanId,
+              borrowerName: borrower.name,
+              status: 'SELECTED',
+              evaluation,
+              investmentAmount: evaluation.investmentAmount,
+            });
+            await panel.close();
+          } catch (error) {
+            if (this.isFatalBrowserError(error)) throw error;
+
+            if (this.isRuleEvaluationFailure(error)) {
+              skipped += 1;
+              const reason = this.ruleEvaluationFailureReason(error);
+              records.push({ rule, borrowerName, status: 'SKIPPED', reason });
+              logger.warn(`Skipping borrower after backend rule failure: ${borrowerName}: ${reason}`);
+              if (panel) await panel.close().catch(() => undefined);
+              continue;
+            }
+
+            failed += 1;
+            ruleBorrowerFailures += 1;
+            const reason = error instanceof Error ? error.message : String(error);
+            errors.push(`${rule}/${borrowerName}: ${reason}`);
+            records.push({ rule, borrowerName, status: 'FAILED', reason });
+            logger.error(`Borrower failed: ${borrowerName}: ${reason}`);
+            if (panel) await panel.close().catch(() => undefined);
           }
         }
 
-        totalBorrowers += processedBorrowerNames.size;
+        totalBorrowers += processedBorrowerHashes.size;
         logger.info(
-          `Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully from ${processedBorrowerNames.size} discovered borrower(s)`,
+          `Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully from ${processedBorrowerHashes.size} discovered borrower fingerprint(s)`,
         );
 
         if (ruleBorrowerFailures > 0) {
@@ -323,10 +332,12 @@ export class LendingWorkflowService {
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
   }
 
-  private async getVisibleBorrowerNames(ui: ManualLendingPage): Promise<string[]> {
+  private async getNextVisibleBorrowerCard(
+    ui: ManualLendingPage,
+    processedBorrowerHashes: Set<string>,
+  ): Promise<VisibleBorrowerCard | undefined> {
     const cards = await ui.getCardLocator();
     const count = await cards.count();
-    const names: string[] = [];
 
     for (let i = 0; i < count; i += 1) {
       const card = cards.nth(i);
@@ -339,11 +350,47 @@ export class LendingWorkflowService {
           .innerText()
           .catch(async () => card.locator("xpath=.//div[contains(@class,'css-69i1ev')]//p[1]").innerText())
       ).trim();
+      if (!name) continue;
 
-      if (name) names.push(name);
+      const paragraphs = (await card.locator('p').allInnerTexts()).map((text) => text.trim());
+      const loanAmount = this.cardValueAfterLabel(paragraphs, 'Loan Approved');
+      const apr = this.cardValueAfterLabel(paragraphs, 'Interest rate (p.a)');
+      const tenure = this.cardValueAfterLabel(paragraphs, 'Tenure');
+
+      if (!loanAmount || !apr || !tenure) {
+        logger.warn(`Skipping borrower card with incomplete fingerprint fields: ${name}`);
+        continue;
+      }
+
+      const hash = this.borrowerCardHash(name, loanAmount, tenure, apr);
+      if (processedBorrowerHashes.has(hash)) continue;
+
+      return { hash, name, loanAmount, tenure, apr, card };
     }
 
-    return names;
+    return undefined;
+  }
+
+  private cardValueAfterLabel(values: string[], label: string): string | undefined {
+    const index = values.findIndex((value) => value.localeCompare(label, undefined, { sensitivity: 'accent' }) === 0);
+    return index >= 0 ? values[index + 1]?.trim() || undefined : undefined;
+  }
+
+  private borrowerCardHash(name: string, loanAmount: string, tenure: string, apr: string): string {
+    const canonical = [name, loanAmount, tenure, apr]
+      .map((value) => value.trim().toLowerCase().replace(/\s+/g, ' '))
+      .join('|');
+    return createHash('sha256').update(canonical, 'utf8').digest('hex');
+  }
+
+  private async openBorrowerCard(card: Locator): Promise<BorrowerPanel> {
+    await expect(card).toBeVisible({ timeout: 5_000 });
+    const arrow = card.locator("div[aria-label='View borrower details']");
+    await arrow.scrollIntoViewIfNeeded();
+    await arrow.click({ force: true });
+    const panel = new BorrowerPanel(this.page);
+    await panel.waitForOpen();
+    return panel;
   }
 
   private throwIfBrowserClosed(): void {
