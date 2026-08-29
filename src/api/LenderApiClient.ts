@@ -23,8 +23,13 @@ const responseSchema = z.object({
 export class LenderApiClient extends BaseApiClient {
   async getLenderData(): Promise<LenderDataResponse> {
     this.logApiRequest('GET', config.lenderDataPath, 'LENDER_DATA');
-    const data = await this.get<unknown>(config.lenderDataPath);
+    const data = await this.get<unknown>(config.lenderDataPath, {
+      params: { lenderId: config.lenderId },
+    });
     const result = responseSchema.parse(data) as LenderDataResponse;
+    if (result.lender.lenderId !== config.lenderId) {
+      throw new Error(`Backend returned lender ${result.lender.lenderId}, expected ${config.lenderId}`);
+    }
     this.logApiSuccess('LENDER_DATA', `lenderId=${result.lender.lenderId} sessionId=${result.sessionId}`);
     return result;
   }
