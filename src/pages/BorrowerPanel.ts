@@ -37,19 +37,16 @@ export class BorrowerPanel {
       false,
     );
     const professional = await this.readPanelFields('Professional Details', ['Occupation', 'Monthly Income']);
-    const personal = await this.readPanelFields('Personal Details', ['Name', 'Age', 'Gender'], false);
+    const personal = await this.readPanelFields('Personal', ['Name', 'Age', 'Gender'], false);
     const loan = await this.readPanelFields(
       'Loan Details',
-      [
-        'Loan ID',
-        'Loan Amount',
-        'Tenure',
-        'Annualized Interest Rate',
-        'Loan Type',
-        'Repayment Frequency',
-      ],
+      ['Loan ID', 'Loan Amount', 'Tenure', 'Annualized Interest Rate'],
       false,
     );
+
+    // Loan-Type and Repayment Frequency are standalone accordion sections.
+    const loanType = await this.readStandaloneSectionValue('Loan-Type');
+    const repaymentFrequency = await this.readStandaloneSectionValue('Repayment Frequency');
 
     const borrower: Borrower = {
       loanId: (loan['Loan ID'] ?? '').trim(),
@@ -64,8 +61,8 @@ export class BorrowerPanel {
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,
       name: (personal.Name ?? '').trim(),
-      loanType: loan['Loan Type']?.trim(),
-      repaymentFrequency: loan['Repayment Frequency']?.trim(),
+      loanType,
+      repaymentFrequency,
       gender: personal.Gender?.trim(),
       riskCategory: risk['Risk Category']?.trim(),
     };
@@ -84,10 +81,17 @@ export class BorrowerPanel {
     return borrower;
   }
 
-  private async expandPanel(panelHeader: string): Promise<void> {
-    const button = this.page
-      .locator('button', { has: this.page.locator('span', { hasText: panelHeader }) })
+  private sectionButton(panelHeader: string): Locator {
+    const escaped = panelHeader.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return this.page
+      .locator('button', {
+        has: this.page.locator('span').filter({ hasText: new RegExp(`^\\s*${escaped}\\s*$`, 'i') }),
+      })
       .first();
+  }
+
+  private async expandPanel(panelHeader: string): Promise<Locator> {
+    const button = this.sectionButton(panelHeader);
     if (await button.count() === 0) {
       throw new Error(`Panel not found: ${panelHeader}`);
     }
@@ -95,6 +99,23 @@ export class BorrowerPanel {
       await button.click();
       await expect(button).toHaveAttribute('aria-expanded', 'true');
     }
+    return button;
+  }
+
+  private async readStandaloneSectionValue(panelHeader: string): Promise<string | undefined> {
+    const button = await this.expandPanel(panelHeader);
+    const controlsId = await button.getAttribute('aria-controls');
+
+    let details: Locator;
+    if (controlsId) {
+      details = this.page.locator(`#${controlsId}`).first();
+    } else {
+      details = button.locator('xpath=ancestor::div[1]/following-sibling::div[1]').first();
+    }
+
+    if ((await details.count()) === 0) return undefined;
+    const value = (await details.innerText()).trim();
+    return value || undefined;
   }
 
   private async readPanelFields(
