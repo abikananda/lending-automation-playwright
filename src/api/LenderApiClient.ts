@@ -7,7 +7,7 @@ const lenderSchema = z.object({
   lenderId: z.string().min(1),
   name: z.string(),
   walletAmount: z.coerce.number().nonnegative(),
-  username: z.string(),
+  username: z.string().min(1),
   mobileNumber: z.string().min(1),
   otpUsername: z.string().optional(),
   lendingRules: z.array(z.string()),
@@ -24,13 +24,13 @@ export class LenderApiClient extends BaseApiClient {
   async getLenderData(): Promise<LenderDataResponse> {
     this.logApiRequest('GET', config.lenderDataPath, 'LENDER_DATA');
     const data = await this.get<unknown>(config.lenderDataPath, {
-      params: { lenderId: config.lenderId },
+      params: { username: config.username },
     });
     const result = responseSchema.parse(data) as LenderDataResponse;
-    if (result.lender.lenderId !== config.lenderId) {
-      throw new Error(`Backend returned lender ${result.lender.lenderId}, expected ${config.lenderId}`);
+    if (result.lender.username !== config.username) {
+      throw new Error(`Backend returned username ${result.lender.username}, expected ${config.username}`);
     }
-    this.logApiSuccess('LENDER_DATA', `lenderId=${result.lender.lenderId} sessionId=${result.sessionId}`);
+    this.logApiSuccess('LENDER_DATA', `username=${result.lender.username} sessionId=${result.sessionId}`);
     return result;
   }
 
