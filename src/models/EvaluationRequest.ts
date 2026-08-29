@@ -14,10 +14,10 @@ export interface EvaluationRequest {
   age: number;
   borrowerType: string;
   repeated: boolean;
-  riskCategory?: string;
-  remainingAmount?: number;
+  loanType?: string;
   repaymentFrequency?: string;
-  panelDetails?: Record<string, string>;
+  gender?: string;
+  riskCategory?: string;
 }
 
 export function toEvaluationRequest(sessionId: string, borrower: Borrower): EvaluationRequest {
@@ -35,9 +35,9 @@ export function toEvaluationRequest(sessionId: string, borrower: Borrower): Eval
     age: borrower.age,
     borrowerType: borrower.borrowerType,
     repeated: borrower.repeated,
-    riskCategory: borrower.riskCategory,
-    remainingAmount: borrower.remainingAmount,
+    loanType: borrower.loanType,
     repaymentFrequency: borrower.repaymentFrequency,
-    panelDetails: borrower.panelDetails,
+    gender: borrower.gender,
+    riskCategory: borrower.riskCategory,
   };
 }
