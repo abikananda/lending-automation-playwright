@@ -1,19 +1,19 @@
 # Browser auth state layout
 
-Saved browser sessions are isolated by lender ID:
+Saved browser sessions are isolated by lender username:
 
 ```text
-playwright/.auth/LENDER_A.json
-playwright/.auth/LENDER_B.json
+playwright/.auth/abikananda.json
+playwright/.auth/seconduser.json
 ```
 
-Failure artifacts are also isolated:
+Failure artifacts are also isolated by username:
 
 ```text
-test-results/LENDER_A/
-test-results/LENDER_B/
-playwright-report/LENDER_A/
-playwright-report/LENDER_B/
+test-results/abikananda/
+test-results/seconduser/
+playwright-report/abikananda/
+playwright-report/seconduser/
 ```
 
-Never reuse one lender's storage-state file for another lender.
+Never reuse one username's storage-state file for another lender.
