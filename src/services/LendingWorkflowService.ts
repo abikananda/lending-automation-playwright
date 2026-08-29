@@ -6,8 +6,6 @@ import { LenderApiClient } from '../api/LenderApiClient';
 import { NpaBorrowerApiClient } from '../api/NpaBorrowerApiClient';
 import { PersistenceApiClient } from '../api/PersistenceApiClient';
 import { config } from '../config/Config';
-import type { Borrower } from '../models/Borrower';
-import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
 import type { NpaBorrower } from '../models/NpaBorrower';
 import { ManualLendingPage } from '../pages/ManualLendingPage';
