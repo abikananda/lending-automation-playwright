@@ -1,4 +1,5 @@
-import type { Page } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { expect, type Locator, type Page } from '@playwright/test';
 import { ApiError } from '../api/BaseApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
 import { HealthApiClient } from '../api/HealthApiClient';
@@ -10,6 +11,7 @@ import type { Borrower } from '../models/Borrower';
 import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
 import type { NpaBorrower } from '../models/NpaBorrower';
+import { BorrowerPanel } from '../pages/BorrowerPanel';
 import { ManualLendingPage } from '../pages/ManualLendingPage';
 import { captureFailure } from '../utils/ScreenshotUtils';
 import { logger } from '../utils/Logger';
@@ -23,6 +25,15 @@ class UncertainFinancialStateError extends Error {
     super(message, options);
     this.name = 'UncertainFinancialStateError';
   }
+}
+
+interface VisibleBorrowerCard {
+  hash: string;
+  name: string;
+  loanAmount: string;
+  tenure: string;
+  apr: string;
+  card: Locator;
 }
 
 export class LendingWorkflowService {
@@ -83,10 +94,10 @@ export class LendingWorkflowService {
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
 
         // LenDenClub virtualizes the borrower list. Opening/closing a borrower can rerender
-        // the mounted cards, so a batch of names captured at one instant becomes stale while
-        // it is processed. Handle exactly one currently rendered borrower, then re-query the
-        // DOM before choosing the next borrower.
-        const processedBorrowerNames = new Set<string>();
+        // mounted cards, so process exactly one currently rendered card and then re-query.
+        // Name alone is not unique; traversal identity is SHA-256(name + loan amount + tenure + APR).
+        // The extracted loanId remains the authoritative financial duplicate guard.
+        const processedBorrowerHashes = new Set<string>();
         const maxConsecutiveNoNewBorrowers = 3;
         let consecutiveNoNewBorrowers = 0;
         let traversalPass = 0;
@@ -95,10 +106,9 @@ export class LendingWorkflowService {
           traversalPass += 1;
           this.throwIfBrowserClosed();
 
-          const visibleNames = await this.getVisibleBorrowerNames(ui);
-          const borrowerName = visibleNames.find((name) => !processedBorrowerNames.has(name));
+          const visibleBorrower = await this.getNextVisibleBorrowerCard(ui, processedBorrowerHashes);
 
-          if (!borrowerName) {
+          if (!visibleBorrower) {
             consecutiveNoNewBorrowers += 1;
             logger.info(
               `No new rendered borrowers for ${rule} on traversal ${traversalPass} (${consecutiveNoNewBorrowers}/${maxConsecutiveNoNewBorrowers})`,
@@ -112,15 +122,16 @@ export class LendingWorkflowService {
           }
 
           consecutiveNoNewBorrowers = 0;
-          processedBorrowerNames.add(borrowerName);
+          processedBorrowerHashes.add(visibleBorrower.hash);
+          const borrowerName = visibleBorrower.name;
           logger.debug(
-            `Processing currently rendered borrower for ${rule} on traversal ${traversalPass}: ${borrowerName}`,
+            `Processing currently rendered borrower for ${rule} on traversal ${traversalPass}: ${borrowerName} fingerprint=${visibleBorrower.hash.slice(0, 12)} loanAmount=${visibleBorrower.loanAmount} tenure=${visibleBorrower.tenure} apr=${visibleBorrower.apr}`,
           );
 
           let panel;
           try {
             this.throwIfBrowserClosed();
-            panel = await ui.openBorrowerByName(borrowerName);
+            panel = await this.openBorrowerCard(visibleBorrower.card);
             const borrower = await panel.extractBorrower();
             borrower.repeated = this.ruleService.getUiOptions(rule).repeated;
             ruleParsedBorrowers += 1;
@@ -237,9 +248,9 @@ export class LendingWorkflowService {
           }
         }
 
-        totalBorrowers += processedBorrowerNames.size;
+        totalBorrowers += processedBorrowerHashes.size;
         logger.info(
-          `Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully from ${processedBorrowerNames.size} discovered borrower(s)`,
+          `Finished parsing borrowers for ${rule}: ${ruleParsedBorrowers} borrower(s) fetched successfully from ${processedBorrowerHashes.size} discovered borrower fingerprint(s)`,
         );
 
         if (ruleBorrowerFailures > 0) {
@@ -321,10 +332,12 @@ export class LendingWorkflowService {
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
   }
 
-  private async getVisibleBorrowerNames(ui: ManualLendingPage): Promise<string[]> {
+  private async getNextVisibleBorrowerCard(
+    ui: ManualLendingPage,
+    processedBorrowerHashes: Set<string>,
+  ): Promise<VisibleBorrowerCard | undefined> {
     const cards = await ui.getCardLocator();
     const count = await cards.count();
-    const names: string[] = [];
 
     for (let i = 0; i < count; i += 1) {
       const card = cards.nth(i);
@@ -337,11 +350,47 @@ export class LendingWorkflowService {
           .innerText()
           .catch(async () => card.locator("xpath=.//div[contains(@class,'css-69i1ev')]//p[1]").innerText())
       ).trim();
+      if (!name) continue;
 
-      if (name) names.push(name);
+      const paragraphs = (await card.locator('p').allInnerTexts()).map((text) => text.trim());
+      const loanAmount = this.cardValueAfterLabel(paragraphs, 'Loan Approved');
+      const apr = this.cardValueAfterLabel(paragraphs, 'Interest rate (p.a)');
+      const tenure = this.cardValueAfterLabel(paragraphs, 'Tenure');
+
+      if (!loanAmount || !apr || !tenure) {
+        logger.warn(`Skipping borrower card with incomplete fingerprint fields: ${name}`);
+        continue;
+      }
+
+      const hash = this.borrowerCardHash(name, loanAmount, tenure, apr);
+      if (processedBorrowerHashes.has(hash)) continue;
+
+      return { hash, name, loanAmount, tenure, apr, card };
     }
 
-    return names;
+    return undefined;
+  }
+
+  private cardValueAfterLabel(values: string[], label: string): string | undefined {
+    const index = values.findIndex((value) => value.localeCompare(label, undefined, { sensitivity: 'accent' }) === 0);
+    return index >= 0 ? values[index + 1]?.trim() || undefined : undefined;
+  }
+
+  private borrowerCardHash(name: string, loanAmount: string, tenure: string, apr: string): string {
+    const canonical = [name, loanAmount, tenure, apr]
+      .map((value) => value.trim().toLowerCase().replace(/\s+/g, ' '))
+      .join('|');
+    return createHash('sha256').update(canonical, 'utf8').digest('hex');
+  }
+
+  private async openBorrowerCard(card: Locator): Promise<BorrowerPanel> {
+    await expect(card).toBeVisible({ timeout: 5_000 });
+    const arrow = card.locator("div[aria-label='View borrower details']");
+    await arrow.scrollIntoViewIfNeeded();
+    await arrow.click({ force: true });
+    const panel = new BorrowerPanel(this.page);
+    await panel.waitForOpen();
+    return panel;
   }
 
   private throwIfBrowserClosed(): void {
