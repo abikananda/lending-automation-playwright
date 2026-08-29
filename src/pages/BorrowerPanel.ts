@@ -19,21 +19,59 @@ export class BorrowerPanel {
   }
 
   private async read(label: string, required = true): Promise<string | undefined> {
-    const value = (await this.field(label).innerText()).trim();
+    const locator = this.field(label);
+    if ((await locator.count()) === 0) {
+      if (required) throw new Error(`Missing borrower field: ${label}`);
+      return undefined;
+    }
+
+    const value = (await locator.innerText()).trim();
     if (!value && required) throw new Error(`Missing borrower field: ${label}`);
     return value || undefined;
+  }
+
+  private async readFirstAvailable(labels: string[]): Promise<string | undefined> {
+    for (const label of labels) {
+      const value = await this.read(label, false);
+      if (value) return value;
+    }
+    return undefined;
   }
 
   async extractBorrower(): Promise<Borrower> {
     const risk = await this.readPanelFields('Risk Category & Score', ['Bureau Score', 'LenDenClub Score']);
     const professional = await this.readPanelFields('Professional Details', ['Occupation', 'Monthly Income']);
     const personal = await this.readPanelFields('Personal Details', ['Name', 'Age']);
-    const loan = await this.readPanelFields('Loan Details', [
-      'Loan ID',
-      'Loan Amount',
-      'Tenure',
-      'Annualized Interest Rate',
-    ], false);
+    const loan = await this.readPanelFields(
+      'Loan Details',
+      ['Loan ID', 'Loan Amount', 'Tenure', 'Annualized Interest Rate'],
+      false,
+    );
+
+    // These fields are documented by LenDenClub as borrower-profile signals, but labels have
+    // changed across UI versions. Treat them as optional and support the known label variants.
+    const riskCategory = await this.readFirstAvailable(['Risk Category', 'Risk']);
+    const remainingAmountText = await this.readFirstAvailable(['Remaining Amount', 'Remaining Loan Amount']);
+    const repaymentFrequency = await this.readFirstAvailable([
+      'Repayment Frequency',
+      'Repayment Type',
+      'Repayment Mode',
+    ]);
+
+    // Preserve the complete expanded panel text as well. This is intentionally observational:
+    // it does not participate in any investment decision, but lets the backend retain newly
+    // introduced LenDenClub fields even before we promote them to first-class typed columns.
+    const rawPanelText = (await this.panel.innerText()).trim();
+    const panelDetails = this.buildPanelDetails(
+      risk,
+      professional,
+      personal,
+      loan,
+      riskCategory,
+      remainingAmountText,
+      repaymentFrequency,
+      rawPanelText,
+    );
 
     const borrower: Borrower = {
       loanId: (loan['Loan ID'] ?? '').trim(),
@@ -48,13 +86,50 @@ export class BorrowerPanel {
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,
       name: (personal.Name ?? '').trim(),
+      riskCategory,
+      remainingAmount: remainingAmountText ? parseMoney(remainingAmountText) : undefined,
+      repaymentFrequency,
+      panelDetails,
     };
 
     if (!borrower.loanId) throw new Error('Missing borrower field: Loan ID');
     if (!borrower.name) throw new Error('Missing borrower field: Name');
 
-    logger.debug(`Borrower extracted: ${borrower.loanId}`);
+    logger.debug(
+      `Borrower extracted: ${borrower.loanId} additionalFields=${JSON.stringify({ riskCategory, remainingAmount: borrower.remainingAmount, repaymentFrequency })}`,
+    );
     return borrower;
+  }
+
+  private buildPanelDetails(
+    risk: Record<string, string | undefined>,
+    professional: Record<string, string | undefined>,
+    personal: Record<string, string | undefined>,
+    loan: Record<string, string | undefined>,
+    riskCategory: string | undefined,
+    remainingAmount: string | undefined,
+    repaymentFrequency: string | undefined,
+    rawPanelText: string,
+  ): Record<string, string> {
+    const details: Record<string, string> = {};
+
+    const add = (section: string, values: Record<string, string | undefined>): void => {
+      for (const [label, value] of Object.entries(values)) {
+        if (value) details[`${section}.${label}`] = value;
+      }
+    };
+
+    add('Risk Category & Score', risk);
+    add('Professional Details', professional);
+    add('Personal Details', personal);
+    add('Loan Details', loan);
+    if (riskCategory) details['Risk Category & Score.Risk Category'] = riskCategory;
+    if (remainingAmount) details['Loan Details.Remaining Amount'] = remainingAmount;
+    if (repaymentFrequency) details['Loan Details.Repayment Frequency'] = repaymentFrequency;
+
+    // Bound the payload to keep persistence predictable if the UI adds a large amount of text.
+    if (rawPanelText) details['_rawPanelText'] = rawPanelText.slice(0, 20_000);
+    return details;
   }
 
   private async expandPanel(panelHeader: string): Promise<void> {
