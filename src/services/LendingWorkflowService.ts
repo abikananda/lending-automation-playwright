@@ -337,43 +337,52 @@ export class LendingWorkflowService {
     processedBorrowerHashes: Set<string>,
   ): Promise<VisibleBorrowerCard | undefined> {
     const cards = await ui.getCardLocator();
-    const count = await cards.count();
+    const summaries = await cards.evaluateAll((elements) =>
+      elements.map((element, index) => {
+        const htmlElement = element as HTMLElement;
+        if (htmlElement.getClientRects().length === 0) return null;
 
-    for (let i = 0; i < count; i += 1) {
-      const card = cards.nth(i);
-      if (!(await card.isVisible().catch(() => false))) continue;
+        const paragraphs = Array.from(element.querySelectorAll('p')).map((paragraph) =>
+          (paragraph.textContent ?? '').trim(),
+        );
+        const valueAfterLabel = (label: string): string | undefined => {
+          const labelIndex = paragraphs.findIndex((value) => value === label);
+          return labelIndex >= 0 ? paragraphs[labelIndex + 1]?.trim() || undefined : undefined;
+        };
 
-      const name = (
-        await card
-          .locator('div.css-69i1ev p.MuiTypography-root')
-          .first()
-          .innerText()
-          .catch(async () => card.locator("xpath=.//div[contains(@class,'css-69i1ev')]//p[1]").innerText())
-      ).trim();
-      if (!name) continue;
+        const name = (
+          element.querySelector('div.css-69i1ev p.MuiTypography-root')?.textContent ?? paragraphs[0] ?? ''
+        ).trim();
+        const loanAmount = valueAfterLabel('Loan Approved');
+        const apr = valueAfterLabel('Interest rate (p.a)');
+        const tenure = valueAfterLabel('Tenure');
 
-      const paragraphs = (await card.locator('p').allInnerTexts()).map((text) => text.trim());
-      const loanAmount = this.cardValueAfterLabel(paragraphs, 'Loan Approved');
-      const apr = this.cardValueAfterLabel(paragraphs, 'Interest rate (p.a)');
-      const tenure = this.cardValueAfterLabel(paragraphs, 'Tenure');
+        return { index, name, loanAmount, tenure, apr };
+      }),
+    );
 
-      if (!loanAmount || !apr || !tenure) {
-        logger.warn(`Skipping borrower card with incomplete fingerprint fields: ${name}`);
+    for (const summary of summaries) {
+      if (!summary?.name) continue;
+
+      if (!summary.loanAmount || !summary.apr || !summary.tenure) {
+        logger.warn(`Skipping borrower card with incomplete fingerprint fields: ${summary.name}`);
         continue;
       }
 
-      const hash = this.borrowerCardHash(name, loanAmount, tenure, apr);
+      const hash = this.borrowerCardHash(summary.name, summary.loanAmount, summary.tenure, summary.apr);
       if (processedBorrowerHashes.has(hash)) continue;
 
-      return { hash, name, loanAmount, tenure, apr, card };
+      return {
+        hash,
+        name: summary.name,
+        loanAmount: summary.loanAmount,
+        tenure: summary.tenure,
+        apr: summary.apr,
+        card: cards.nth(summary.index),
+      };
     }
 
     return undefined;
-  }
-
-  private cardValueAfterLabel(values: string[], label: string): string | undefined {
-    const index = values.findIndex((value) => value.localeCompare(label, undefined, { sensitivity: 'accent' }) === 0);
-    return index >= 0 ? values[index + 1]?.trim() || undefined : undefined;
   }
 
   private borrowerCardHash(name: string, loanAmount: string, tenure: string, apr: string): string {
