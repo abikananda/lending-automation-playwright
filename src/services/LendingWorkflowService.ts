@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { expect, type Locator, type Page } from '@playwright/test';
 import { ApiError } from '../api/BaseApiClient';
 import { EvaluationApiClient } from '../api/EvaluationApiClient';
@@ -7,6 +7,7 @@ import { LenderApiClient } from '../api/LenderApiClient';
 import { NpaBorrowerApiClient } from '../api/NpaBorrowerApiClient';
 import { PersistenceApiClient } from '../api/PersistenceApiClient';
 import { config } from '../config/Config';
+import { UncertainFinancialStateError } from '../errors/UncertainFinancialStateError';
 import type { Borrower } from '../models/Borrower';
 import type { EvaluationResponse } from '../models/EvaluationResponse';
 import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
@@ -16,16 +17,11 @@ import { ManualLendingPage } from '../pages/ManualLendingPage';
 import { captureFailure } from '../utils/ScreenshotUtils';
 import { logger } from '../utils/Logger';
 import { BorrowerService } from './BorrowerService';
+import { FinancialExecutionService } from './FinancialExecutionService';
 import { InvestmentService } from './InvestmentService';
 import { LendingRuleService } from './LendingRuleService';
 import { PersistenceService } from './PersistenceService';
-
-class UncertainFinancialStateError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = 'UncertainFinancialStateError';
-  }
-}
+import { WorkflowCheckpointService } from './WorkflowCheckpointService';
 
 interface VisibleBorrowerCard {
   hash: string;
@@ -46,6 +42,8 @@ export class LendingWorkflowService {
   private readonly persistenceApi = new PersistenceApiClient();
   private readonly ruleService = new LendingRuleService();
   private readonly persistenceService = new PersistenceService(this.persistenceApi);
+  private readonly financialExecutionService = new FinancialExecutionService();
+  private readonly checkpointService = new WorkflowCheckpointService(this.lenderApi);
 
   constructor(private readonly page: Page) {}
 
@@ -53,22 +51,29 @@ export class LendingWorkflowService {
     logger.info('Starting lending workflow');
     await this.healthApi.assertHealthy();
 
-    const lenderData = await this.lenderApi.getLenderData();
-    if (!lenderData.lender.active) throw new Error('Lender is inactive; stopping workflow');
+    // Verify the reusable browser login before any state-changing backend session call.
+    await this.ensureReusableAuthenticatedSession();
 
-    logger.info(`Session: ${lenderData.sessionId}`);
-    logger.info(`Lender: ${lenderData.lender.name}`);
-    logger.info(`Wallet: ₹${lenderData.lender.walletAmount}`);
-    logger.info(`Rules: ${JSON.stringify(lenderData.lender.lendingRules)}`);
-    await this.persistenceService.session(lenderData);
+    const lenderConfig = await this.lenderApi.getLenderConfig();
+    if (!lenderConfig.active) throw new Error('Lender is inactive; stopping workflow');
 
+    // NPA data is also loaded before creating a session so startup failures do not leave
+    // an unnecessary backend session/lease behind.
     const npaBorrowers = await this.npaBorrowerApi.getActiveBorrowers();
     const npaBorrowersByName = new Map<string, NpaBorrower>(
       npaBorrowers.map((borrower) => [this.normalizeBorrowerName(borrower.borrowerName), borrower]),
     );
     logger.info(`Loaded ${npaBorrowersByName.size} active NPA borrower(s) for this run`);
 
-    await this.ensureReusableAuthenticatedSession();
+    const ownerId = `PW-${config.username}-${randomUUID()}`;
+    const lenderData = await this.lenderApi.startSession(ownerId);
+
+    logger.info(`Session: ${lenderData.sessionId}`);
+    logger.info(`Lender: ${lenderData.lender.name}`);
+    logger.info(`Wallet: ₹${lenderData.lender.walletAmount}`);
+    logger.info(`Rules: ${JSON.stringify(lenderData.lender.lendingRules)}`);
+    logger.info(`Execution owner: ${ownerId}`);
+    await this.persistenceService.session(lenderData);
 
     const investment = new InvestmentService(lenderData.lender);
     const borrowerService = new BorrowerService(this.evaluationApi, this.persistenceApi);
@@ -86,6 +91,8 @@ export class LendingWorkflowService {
 
     for (const rule of rules) {
       try {
+        await this.lenderApi.heartbeat(lenderData.sessionId);
+
         const ruleStartedAt = Date.now();
         logger.info(
           `Starting rule: ${rule} with traversal budget ${LendingWorkflowService.RULE_TRAVERSAL_TIMEOUT_MS / 60_000} minute(s)`,
@@ -100,8 +107,6 @@ export class LendingWorkflowService {
 
         // LenDenClub virtualizes the borrower list. Opening/closing a borrower can rerender
         // mounted cards, so process exactly one currently rendered card and then re-query.
-        // evaluateAll() is only used to read the currently mounted card summaries in one
-        // browser round-trip; borrowers are still opened and processed one at a time.
         // Name alone is not unique; traversal identity is SHA-256(name + loan amount + tenure + APR).
         // The extracted loanId remains the authoritative financial duplicate guard.
         const processedBorrowerHashes = new Set<string>();
@@ -142,7 +147,8 @@ export class LendingWorkflowService {
             `Processing currently rendered borrower for ${rule} on traversal ${traversalPass}: ${borrowerName} fingerprint=${visibleBorrower.hash.slice(0, 12)} loanAmount=${visibleBorrower.loanAmount} tenure=${visibleBorrower.tenure} apr=${visibleBorrower.apr}`,
           );
 
-          let panel;
+          let panel: BorrowerPanel | undefined;
+          let financialSelectionMade = false;
           try {
             this.throwIfBrowserClosed();
             panel = await this.openBorrowerCard(visibleBorrower.card);
@@ -153,9 +159,21 @@ export class LendingWorkflowService {
               `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
             );
 
+            await this.checkpointService.record(lenderData.sessionId, 'EXTRACTED', {
+              rule,
+              loanId: borrower.loanId,
+              message: `Borrower extracted name=${borrower.name}`,
+            });
+
             const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
             this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
             evaluated += 1;
+
+            await this.checkpointService.record(lenderData.sessionId, 'EVALUATED', {
+              rule,
+              loanId: borrower.loanId,
+              message: `decision=${evaluation.decision ?? 'NONE'} ruleVersion=${evaluation.ruleVersion} rulesetVersion=${evaluation.rulesetVersion} engineVersion=${evaluation.engineVersion}`,
+            });
 
             if (evaluation.decision === null || evaluation.decision.toUpperCase() !== 'INVEST') {
               skipped += 1;
@@ -220,7 +238,14 @@ export class LendingWorkflowService {
             }
 
             investment.validateInvestmentAmount(evaluation.investmentAmount);
-            await panel.addLoan();
+            await this.checkpointService.record(lenderData.sessionId, 'APPROVED', {
+              rule,
+              loanId: borrower.loanId,
+              message: `Investment approved amount=${evaluation.investmentAmount}`,
+            });
+
+            await this.financialExecutionService.addLoan(panel);
+            financialSelectionMade = true;
 
             if (ruleInvestmentAmount === undefined) {
               ruleInvestmentAmount = evaluation.investmentAmount;
@@ -239,8 +264,22 @@ export class LendingWorkflowService {
               evaluation,
               investmentAmount: evaluation.investmentAmount,
             });
+
+            await this.checkpointService.record(lenderData.sessionId, 'UI_SELECTED', {
+              rule,
+              loanId: borrower.loanId,
+              message: `Add Loan confirmed amount=${evaluation.investmentAmount}`,
+            });
+
             await panel.close();
           } catch (error) {
+            if (error instanceof UncertainFinancialStateError) throw error;
+            if (financialSelectionMade) {
+              throw new UncertainFinancialStateError(
+                `Add Loan was confirmed for ${borrowerName}, but a subsequent workflow step failed before rule finalization. Workflow stopped to avoid unsafe continuation.`,
+                { cause: error instanceof Error ? error : undefined },
+              );
+            }
             if (this.isFatalBrowserError(error)) throw error;
 
             if (this.isRuleEvaluationFailure(error)) {
@@ -276,24 +315,63 @@ export class LendingWorkflowService {
           if (ruleInvestmentAmount === undefined) {
             throw new Error(`Missing investment amount for rule ${rule} despite ${ruleInvested} selected loan(s)`);
           }
+
           this.throwIfBrowserClosed();
-          await ui.setInvestmentAmount(ruleInvestmentAmount);
-          await ui.clickContinue();
+          await this.lenderApi.heartbeat(lenderData.sessionId);
+          await this.financialExecutionService.finalizeRule(ui, rule, ruleInvestmentAmount, {
+            onContinueClicked: () =>
+              this.checkpointService.record(lenderData.sessionId, 'CONTINUE_CLICKED', {
+                rule,
+                message: `Continue clicked amount=${ruleInvestmentAmount} selectedLoans=${ruleInvested}`,
+              }),
+          });
+
+          const finalizedRecords = records.filter(
+            (record) => record.rule === rule && record.status === 'SELECTED',
+          );
+          for (const record of finalizedRecords) record.status = 'FINALIZED';
+
+          for (const record of finalizedRecords) {
+            await this.recordCheckpointBestEffort(lenderData.sessionId, 'PLATFORM_CONFIRMED', {
+              rule,
+              loanId: record.loanId,
+              message: `LenDenClub lending success confirmed amount=${record.investmentAmount}`,
+            });
+          }
+
+          let persistedRecords: BorrowerExecutionRecord[];
           try {
-            await ui.validateSuccess();
+            persistedRecords = await this.persistenceService.persistFinalizedRule(
+              lenderData.sessionId,
+              rule,
+              records,
+            );
           } catch (error) {
             throw new UncertainFinancialStateError(
-              `Continue was clicked for rule ${rule}, but lending success could not be confirmed. Workflow stopped to avoid a duplicate financial action.`,
-              { cause: error },
+              `LenDenClub confirmed lending for rule ${rule}, but backend investment reconciliation failed. Workflow stopped; do not retry financial actions until reconciled.`,
+              { cause: error instanceof Error ? error : undefined },
             );
           }
-          for (const record of records) {
-            if (record.rule === rule && record.status === 'SELECTED') record.status = 'FINALIZED';
+
+          for (const record of persistedRecords) {
+            await this.recordCheckpointBestEffort(lenderData.sessionId, 'BACKEND_RECORDED', {
+              rule,
+              loanId: record.loanId,
+              message: `Confirmed investment persisted amount=${record.investmentAmount}`,
+            });
           }
-          logger.info(`Rule ${rule} finalized successfully`);
+
+          logger.info(`Rule ${rule} finalized and persisted successfully`);
           await ui.goDashboard();
         }
       } catch (error) {
+        if (error instanceof UncertainFinancialStateError) {
+          logger.error(
+            `Fatal financial workflow state during rule ${rule}; workflow aborted and backend session will not be marked COMPLETED: ${error.message}`,
+          );
+          throw error;
+        }
+
         if (this.isFatalBrowserError(error)) {
           logger.error(
             `Fatal browser failure during rule ${rule}; workflow aborted and backend session will not be marked COMPLETED: ${error instanceof Error ? error.message : String(error)}`,
@@ -306,7 +384,6 @@ export class LendingWorkflowService {
         failed += 1;
         logger.error(`Rule ${rule} failed: ${reason}`);
         await captureFailure(this.page, `rule-${rule}`);
-        if (error instanceof UncertainFinancialStateError) throw error;
         try {
           await ui.closeOpenModalIfPresent();
         } catch (cleanupError) {
@@ -344,6 +421,20 @@ export class LendingWorkflowService {
     }
 
     logger.info(`Workflow complete. Total investment: ₹${report.totalInvestment}`);
+  }
+
+  private async recordCheckpointBestEffort(
+    sessionId: string,
+    state: 'PLATFORM_CONFIRMED' | 'BACKEND_RECORDED',
+    details: { loanId?: string; rule?: string; message?: string },
+  ): Promise<void> {
+    try {
+      await this.checkpointService.record(sessionId, state, details);
+    } catch (error) {
+      logger.error(
+        `Workflow checkpoint persistence failed state=${state} sessionId=${sessionId} loanId=${details.loanId ?? 'NONE'}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private async getNextVisibleBorrowerCard(
