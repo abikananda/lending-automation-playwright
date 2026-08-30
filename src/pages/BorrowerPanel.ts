@@ -16,12 +16,18 @@ export class BorrowerPanel {
     await expect(this.panel).toBeVisible({ timeout: BorrowerPanel.PANEL_OPEN_TIMEOUT_MS });
   }
 
-  private field(label: string): Locator {
-    return this.panel.locator(`xpath=.//div[normalize-space()='${label}']/ancestor::div[1]/following-sibling::div[1]//div`).first();
+  private fieldWithin(container: Locator, label: string): Locator {
+    return container
+      .locator(`xpath=.//div[normalize-space()='${label}']/ancestor::div[1]/following-sibling::div[1]//div`)
+      .first();
   }
 
-  private async read(label: string, required = true): Promise<string | undefined> {
-    const locator = this.field(label);
+  private async readWithin(
+    container: Locator,
+    label: string,
+    required = true,
+  ): Promise<string | undefined> {
+    const locator = this.fieldWithin(container, label);
     if ((await locator.count()) === 0) {
       if (required) throw new Error(`Missing borrower field: ${label}`);
       return undefined;
@@ -38,7 +44,10 @@ export class BorrowerPanel {
       ['Bureau Score', 'LenDenClub Score', 'Risk Category'],
       false,
     );
-    const professional = await this.readPanelFields('Professional Details', ['Occupation', 'Monthly Income']);
+    const professional = await this.readPanelFields(
+      'Professional Details',
+      ['Occupation', 'Monthly Income'],
+    );
     const personal = await this.readPanelFields('Personal', ['Name', 'Age', 'Gender'], false);
     const loan = await this.readPanelFields(
       'Loan',
@@ -79,10 +88,14 @@ export class BorrowerPanel {
     return borrower;
   }
 
-  private async expandPanel(panelHeader: string): Promise<void> {
-    const button = this.page
+  private panelButton(panelHeader: string): Locator {
+    return this.page
       .locator('button', { has: this.page.locator('span', { hasText: panelHeader }) })
       .first();
+  }
+
+  private async expandPanel(panelHeader: string): Promise<Locator> {
+    const button = this.panelButton(panelHeader);
     if (await button.count() === 0) {
       throw new Error(`Panel not found: ${panelHeader}`);
     }
@@ -90,6 +103,19 @@ export class BorrowerPanel {
       await button.click();
       await expect(button).toHaveAttribute('aria-expanded', 'true');
     }
+    return button;
+  }
+
+  private async panelSection(panelHeader: string, labels: string[]): Promise<Locator> {
+    const button = await this.expandPanel(panelHeader);
+    const predicates = labels
+      .map((label) => `.//div[normalize-space()='${label}']`)
+      .join(' and ');
+    const section = button.locator(`xpath=ancestor::*[${predicates}][1]`);
+    if ((await section.count()) === 0) {
+      throw new Error(`Expanded panel content not found: ${panelHeader}`);
+    }
+    return section;
   }
 
   private async readPanelFields(
@@ -97,10 +123,10 @@ export class BorrowerPanel {
     labels: string[],
     required = true,
   ): Promise<Record<string, string | undefined>> {
-    await this.expandPanel(panelHeader);
+    const section = await this.panelSection(panelHeader, labels);
     const values: Record<string, string | undefined> = {};
     for (const label of labels) {
-      values[label] = await this.read(label, required);
+      values[label] = await this.readWithin(section, label, required);
     }
     return values;
   }
