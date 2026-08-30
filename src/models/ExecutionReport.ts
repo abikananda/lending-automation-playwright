@@ -1,6 +1,12 @@
 import type { EvaluationResponse } from './EvaluationResponse';
 
-export type BorrowerStatus = 'SELECTED' | 'FINALIZED' | 'SKIPPED' | 'FAILED' | 'UNCERTAIN';
+export type BorrowerStatus =
+  | 'SELECTED'
+  | 'FINALIZED'
+  | 'PERSISTED'
+  | 'SKIPPED'
+  | 'FAILED'
+  | 'UNCERTAIN';
 
 export interface BorrowerExecutionRecord {
   rule: string;
