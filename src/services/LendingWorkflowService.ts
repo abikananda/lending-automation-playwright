@@ -81,10 +81,18 @@ export class LendingWorkflowService {
     let skipped = 0;
     let failed = 0;
     let totalBorrowers = 0;
+    let stopScrapingForLowWallet = false;
 
     const rules = this.ruleService.getRuleOrder(lenderData.lender.lendingRules);
 
     for (const rule of rules) {
+      if (!investment.canFundAnotherInvestment()) {
+        logger.info(
+          `Stopping borrower scraping before rule ${rule}: remaining wallet ₹${investment.remainingWallet} is below minimum investment ₹${InvestmentService.MINIMUM_INVESTMENT_AMOUNT}`,
+        );
+        break;
+      }
+
       try {
         const ruleStartedAt = Date.now();
         logger.info(
@@ -98,18 +106,20 @@ export class LendingWorkflowService {
         await ui.openLoanListForRule(rule);
         await ui.applyFiltersAndSort(this.ruleService.getUiOptions(rule));
 
-        // LenDenClub virtualizes the borrower list. Opening/closing a borrower can rerender
-        // mounted cards, so process exactly one currently rendered card and then re-query.
-        // evaluateAll() is only used to read the currently mounted card summaries in one
-        // browser round-trip; borrowers are still opened and processed one at a time.
-        // Name alone is not unique; traversal identity is SHA-256(name + loan amount + tenure + APR).
-        // The extracted loanId remains the authoritative financial duplicate guard.
         const processedBorrowerHashes = new Set<string>();
         const maxConsecutiveNoNewBorrowers = 5;
         let consecutiveNoNewBorrowers = 0;
         let traversalPass = 0;
 
         while (consecutiveNoNewBorrowers < maxConsecutiveNoNewBorrowers) {
+          if (!investment.canFundAnotherInvestment()) {
+            stopScrapingForLowWallet = true;
+            logger.info(
+              `Stopping borrower scraping for ${rule}: remaining wallet ₹${investment.remainingWallet} is below minimum investment ₹${InvestmentService.MINIMUM_INVESTMENT_AMOUNT}; finalizing already selected loans`,
+            );
+            break;
+          }
+
           if (Date.now() - ruleStartedAt >= LendingWorkflowService.RULE_TRAVERSAL_TIMEOUT_MS) {
             logger.info(
               `Rule ${rule} reached the 15-minute traversal limit after ${processedBorrowerHashes.size} borrower fingerprint(s); stopping scan and finalizing selected loans`,
@@ -240,6 +250,14 @@ export class LendingWorkflowService {
               investmentAmount: evaluation.investmentAmount,
             });
             await panel.close();
+
+            if (!investment.canFundAnotherInvestment()) {
+              stopScrapingForLowWallet = true;
+              logger.info(
+                `Remaining wallet ₹${investment.remainingWallet} cannot fund another minimum ₹${InvestmentService.MINIMUM_INVESTMENT_AMOUNT} investment; stopping borrower scraping after ${borrower.loanId}`,
+              );
+              break;
+            }
           } catch (error) {
             if (this.isFatalBrowserError(error)) throw error;
 
@@ -292,6 +310,13 @@ export class LendingWorkflowService {
           }
           logger.info(`Rule ${rule} finalized successfully`);
           await ui.goDashboard();
+        }
+
+        if (stopScrapingForLowWallet) {
+          logger.info(
+            `Stopping remaining lending rules because remaining wallet ₹${investment.remainingWallet} is below minimum investment ₹${InvestmentService.MINIMUM_INVESTMENT_AMOUNT}`,
+          );
+          break;
         }
       } catch (error) {
         if (this.isFatalBrowserError(error)) {
