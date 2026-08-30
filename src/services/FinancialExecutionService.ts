@@ -2,17 +2,28 @@ import { UncertainFinancialStateError } from '../errors/UncertainFinancialStateE
 import type { BorrowerPanel } from '../pages/BorrowerPanel';
 import type { ManualLendingPage } from '../pages/ManualLendingPage';
 
+export interface RuleFinalizationHooks {
+  onContinueClicked?: () => Promise<void>;
+  onPlatformConfirmed?: () => Promise<void>;
+}
+
 export class FinancialExecutionService {
   async addLoan(panel: BorrowerPanel): Promise<void> {
     await panel.addLoan();
   }
 
-  async finalizeRule(ui: ManualLendingPage, rule: string, investmentAmount: number): Promise<void> {
+  async finalizeRule(
+    ui: ManualLendingPage,
+    rule: string,
+    investmentAmount: number,
+    hooks: RuleFinalizationHooks = {},
+  ): Promise<void> {
     await ui.setInvestmentAmount(investmentAmount);
 
     // Continue is a financial action. It is clicked once only. Any ambiguity after
     // the click is fatal because retrying could duplicate lending.
     await ui.clickContinue();
+    await hooks.onContinueClicked?.();
     try {
       await ui.validateSuccess();
     } catch (error) {
@@ -21,5 +32,6 @@ export class FinancialExecutionService {
         { cause: error },
       );
     }
+    await hooks.onPlatformConfirmed?.();
   }
 }
