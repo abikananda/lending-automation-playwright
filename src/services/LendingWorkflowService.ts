@@ -105,7 +105,7 @@ export class LendingWorkflowService {
         // Name alone is not unique; traversal identity is SHA-256(name + loan amount + tenure + APR).
         // The extracted loanId remains the authoritative financial duplicate guard.
         const processedBorrowerHashes = new Set<string>();
-        const maxConsecutiveNoNewBorrowers = 3;
+        const maxConsecutiveNoNewBorrowers = 5;
         let consecutiveNoNewBorrowers = 0;
         let traversalPass = 0;
 
