@@ -2,6 +2,8 @@ import type { Lender } from '../models/LenderData';
 import { logger } from '../utils/Logger';
 
 export class InvestmentService {
+  static readonly MINIMUM_INVESTMENT_AMOUNT = 250;
+
   private totalInvestment = 0;
 
   constructor(private readonly lender: Lender) {}
@@ -12,6 +14,10 @@ export class InvestmentService {
 
   get investedAmount(): number {
     return this.totalInvestment;
+  }
+
+  canFundAnotherInvestment(): boolean {
+    return this.remainingWallet >= InvestmentService.MINIMUM_INVESTMENT_AMOUNT;
   }
 
   validateInvestmentAmount(amount: number): void {
