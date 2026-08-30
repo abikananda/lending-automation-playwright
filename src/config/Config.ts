@@ -45,7 +45,7 @@ export const config = {
   persistence: {
     borrower: process.env.PERSIST_BORROWER_PATH,
     evaluation: process.env.PERSIST_EVALUATION_PATH,
-    investment: process.env.PERSIST_INVESTMENT_PATH,
+    investment: required('PERSIST_INVESTMENT_PATH', '/api/investment/status'),
     session: process.env.PERSIST_SESSION_PATH,
     result: process.env.PERSIST_RESULT_PATH,
   },
