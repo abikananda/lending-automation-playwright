@@ -37,6 +37,8 @@ interface VisibleBorrowerCard {
 }
 
 export class LendingWorkflowService {
+  private static readonly RULE_TRAVERSAL_TIMEOUT_MS = 15 * 60 * 1000;
+
   private readonly healthApi = new HealthApiClient();
   private readonly lenderApi = new LenderApiClient();
   private readonly evaluationApi = new EvaluationApiClient();
@@ -84,7 +86,10 @@ export class LendingWorkflowService {
 
     for (const rule of rules) {
       try {
-        logger.info(`Starting rule: ${rule}`);
+        const ruleStartedAt = Date.now();
+        logger.info(
+          `Starting rule: ${rule} with traversal budget ${LendingWorkflowService.RULE_TRAVERSAL_TIMEOUT_MS / 60_000} minute(s)`,
+        );
         let ruleInvested = 0;
         let ruleBorrowerFailures = 0;
         let ruleInvestmentAmount: number | undefined;
@@ -95,6 +100,8 @@ export class LendingWorkflowService {
 
         // LenDenClub virtualizes the borrower list. Opening/closing a borrower can rerender
         // mounted cards, so process exactly one currently rendered card and then re-query.
+        // evaluateAll() is only used to read the currently mounted card summaries in one
+        // browser round-trip; borrowers are still opened and processed one at a time.
         // Name alone is not unique; traversal identity is SHA-256(name + loan amount + tenure + APR).
         // The extracted loanId remains the authoritative financial duplicate guard.
         const processedBorrowerHashes = new Set<string>();
@@ -103,6 +110,13 @@ export class LendingWorkflowService {
         let traversalPass = 0;
 
         while (consecutiveNoNewBorrowers < maxConsecutiveNoNewBorrowers) {
+          if (Date.now() - ruleStartedAt >= LendingWorkflowService.RULE_TRAVERSAL_TIMEOUT_MS) {
+            logger.info(
+              `Rule ${rule} reached the 15-minute traversal limit after ${processedBorrowerHashes.size} borrower fingerprint(s); stopping scan and finalizing selected loans`,
+            );
+            break;
+          }
+
           traversalPass += 1;
           this.throwIfBrowserClosed();
 
