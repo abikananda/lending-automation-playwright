@@ -48,5 +48,24 @@ test.describe('InvestmentService', () => {
 
     expect(service.investedAmount).toBe(2_500);
     expect(service.remainingWallet).toBe(0);
+    expect(service.canFundAnotherInvestment()).toBe(false);
+  });
+
+  test('reports wallet as non-investable below the minimum ₹250 amount', () => {
+    const service = new InvestmentService(lender(499));
+
+    service.reserveAfterSuccessfulAddLoan(250);
+
+    expect(service.remainingWallet).toBe(249);
+    expect(service.canFundAnotherInvestment()).toBe(false);
+  });
+
+  test('continues when exactly ₹250 remains', () => {
+    const service = new InvestmentService(lender(500));
+
+    service.reserveAfterSuccessfulAddLoan(250);
+
+    expect(service.remainingWallet).toBe(250);
+    expect(service.canFundAnotherInvestment()).toBe(true);
   });
 });
