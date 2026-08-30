@@ -25,8 +25,12 @@ export class PersistenceService {
   }
 
   async result(report: ExecutionReport): Promise<void> {
+    const failures: string[] = [];
+
     for (const record of report.records) {
-      if (record.status !== 'FINALIZED' || !record.loanId || !record.investmentAmount) continue;
+      if (record.status !== 'FINALIZED' || !record.loanId || record.investmentAmount === undefined) {
+        continue;
+      }
 
       try {
         await this.api.saveInvestment({
@@ -37,12 +41,20 @@ export class PersistenceService {
           message: `Confirmed by Playwright workflow rule=${record.rule}`,
         });
       } catch (error) {
-        // Browser investment is already confirmed at this point. Never retry the financial UI
-        // action because persistence failed; surface the bookkeeping failure for reconciliation.
+        const reason = error instanceof Error ? error.message : String(error);
+        failures.push(`${record.loanId}: ${reason}`);
+        // The browser investment is already confirmed. Never retry the UI action; continue
+        // attempting the remaining bookkeeping records once so reconciliation is complete.
         logger.error(
-          `Confirmed investment persistence failed sessionId=${report.sessionId} loanId=${record.loanId}: ${error instanceof Error ? error.message : String(error)}`,
+          `Confirmed investment persistence failed sessionId=${report.sessionId} loanId=${record.loanId}: ${reason}`,
         );
       }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(
+        `Confirmed lending succeeded but backend investment history is incomplete; manual reconciliation required: ${failures.join('; ')}`,
+      );
     }
 
     await this.api.saveResult(report);
