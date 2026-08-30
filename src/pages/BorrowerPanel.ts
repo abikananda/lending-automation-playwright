@@ -106,12 +106,11 @@ export class BorrowerPanel {
     return button;
   }
 
-  private async panelSection(panelHeader: string, labels: string[]): Promise<Locator> {
+  private async panelSection(panelHeader: string, anchorLabel: string): Promise<Locator> {
     const button = await this.expandPanel(panelHeader);
-    const predicates = labels
-      .map((label) => `.//div[normalize-space()='${label}']`)
-      .join(' and ');
-    const section = button.locator(`xpath=ancestor::*[${predicates}][1]`);
+    const section = button.locator(
+      `xpath=ancestor::*[.//div[normalize-space()='${anchorLabel}']][1]`,
+    );
     if ((await section.count()) === 0) {
       throw new Error(`Expanded panel content not found: ${panelHeader}`);
     }
@@ -123,7 +122,7 @@ export class BorrowerPanel {
     labels: string[],
     required = true,
   ): Promise<Record<string, string | undefined>> {
-    const section = await this.panelSection(panelHeader, labels);
+    const section = await this.panelSection(panelHeader, labels[0]);
     const values: Record<string, string | undefined> = {};
     for (const label of labels) {
       values[label] = await this.readWithin(section, label, required);
