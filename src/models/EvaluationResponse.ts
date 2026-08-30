@@ -5,6 +5,9 @@ export interface EvaluationResponse {
   riskLevel: string | null;
   investmentAmount: number;
   rule: string | null;
+  ruleVersion: string;
+  rulesetVersion: string;
+  engineVersion: string;
   reason: string | null;
   evaluationId: number | null;
 }

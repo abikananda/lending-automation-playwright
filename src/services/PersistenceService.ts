@@ -1,6 +1,6 @@
 import type { PersistenceApiClient } from '../api/PersistenceApiClient';
 import type { EvaluationResponse } from '../models/EvaluationResponse';
-import type { ExecutionReport } from '../models/ExecutionReport';
+import type { BorrowerExecutionRecord, ExecutionReport } from '../models/ExecutionReport';
 import type { LenderDataResponse } from '../models/LenderData';
 import type { Borrower } from '../models/Borrower';
 import { logger } from '../utils/Logger';
@@ -24,29 +24,39 @@ export class PersistenceService {
     await this.api.saveInvestment(data);
   }
 
-  async result(report: ExecutionReport): Promise<void> {
+  async persistFinalizedRule(
+    sessionId: string,
+    rule: string,
+    records: BorrowerExecutionRecord[],
+  ): Promise<BorrowerExecutionRecord[]> {
     const failures: string[] = [];
+    const persisted: BorrowerExecutionRecord[] = [];
 
-    for (const record of report.records) {
-      if (record.status !== 'FINALIZED' || !record.loanId || record.investmentAmount === undefined) {
+    for (const record of records) {
+      if (
+        record.rule !== rule ||
+        record.status !== 'FINALIZED' ||
+        !record.loanId ||
+        record.investmentAmount === undefined
+      ) {
         continue;
       }
 
       try {
         await this.api.saveInvestment({
-          sessionId: report.sessionId,
+          sessionId,
           loanId: record.loanId,
           investmentAmount: record.investmentAmount,
           status: 'SUCCESS',
           message: `Confirmed by Playwright workflow rule=${record.rule}`,
         });
+        record.status = 'PERSISTED';
+        persisted.push(record);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         failures.push(`${record.loanId}: ${reason}`);
-        // The browser investment is already confirmed. Never retry the UI action; continue
-        // attempting the remaining bookkeeping records once so reconciliation is complete.
         logger.error(
-          `Confirmed investment persistence failed sessionId=${report.sessionId} loanId=${record.loanId}: ${reason}`,
+          `Confirmed investment persistence failed sessionId=${sessionId} loanId=${record.loanId}: ${reason}`,
         );
       }
     }
@@ -57,6 +67,16 @@ export class PersistenceService {
       );
     }
 
+    return persisted;
+  }
+
+  async result(report: ExecutionReport): Promise<void> {
+    const unpersisted = report.records.filter((record) => record.status === 'FINALIZED');
+    if (unpersisted.length > 0) {
+      throw new Error(
+        `Cannot finalize report: ${unpersisted.length} confirmed investment(s) have not been persisted`,
+      );
+    }
     await this.api.saveResult(report);
   }
 }

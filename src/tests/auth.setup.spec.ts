@@ -1,4 +1,5 @@
 import { test } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { LenderApiClient } from '../api/LenderApiClient';
@@ -11,12 +12,13 @@ export const AUTH_STATE_PATH = runPaths.authState;
 
 test('authenticate and save LenDenClub session', async ({ page }) => {
   const lenderApi = new LenderApiClient();
-  const lenderData = await lenderApi.getLenderData();
+  const lender = await lenderApi.getLenderConfig();
+  const lenderData = await lenderApi.startSession(`AUTH-${config.username}-${randomUUID()}`);
 
   try {
     await new LoginService(new OtpApiClient()).login(
       page,
-      lenderData.lender.mobileNumber,
+      lender.mobileNumber,
       lenderData.sessionId,
     );
 
