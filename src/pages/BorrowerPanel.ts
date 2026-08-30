@@ -122,7 +122,10 @@ export class BorrowerPanel {
     labels: string[],
     required = true,
   ): Promise<Record<string, string | undefined>> {
-    const section = await this.panelSection(panelHeader, labels[0]);
+    const anchorLabel = labels[0];
+    if (!anchorLabel) throw new Error(`No borrower fields configured for panel: ${panelHeader}`);
+
+    const section = await this.panelSection(panelHeader, anchorLabel);
     const values: Record<string, string | undefined> = {};
     for (const label of labels) {
       values[label] = await this.readWithin(section, label, required);
