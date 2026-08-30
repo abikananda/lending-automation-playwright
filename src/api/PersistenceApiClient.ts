@@ -30,8 +30,8 @@ export class PersistenceApiClient extends BaseApiClient {
   async saveInvestment(data: unknown): Promise<void> {
     if (!config.persistence.investment) return;
     this.logApiRequest('POST', config.persistence.investment, 'SAVE_INVESTMENT');
-    // This endpoint is persistence-only; it must not trigger a second investment action.
-    await this.post(config.persistence.investment, data);
+    // Financial bookkeeping for an already-confirmed browser action: never retry automatically.
+    await this.postFinancial(config.persistence.investment, data);
     this.logApiSuccess('SAVE_INVESTMENT');
   }
 
