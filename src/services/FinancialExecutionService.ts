@@ -20,18 +20,19 @@ export class FinancialExecutionService {
   ): Promise<void> {
     await ui.setInvestmentAmount(investmentAmount);
 
-    // Continue is a financial action. It is clicked once only. Any ambiguity after
-    // the click is fatal because retrying could duplicate lending.
+    // Continue is a financial action. It is clicked once only. From this point onward,
+    // any failure is treated as fatal because the request may already have reached the platform.
     await ui.clickContinue();
-    await hooks.onContinueClicked?.();
     try {
+      await hooks.onContinueClicked?.();
       await ui.validateSuccess();
+      await hooks.onPlatformConfirmed?.();
     } catch (error) {
+      if (error instanceof UncertainFinancialStateError) throw error;
       throw new UncertainFinancialStateError(
-        `Continue was clicked for rule ${rule}, but lending success could not be confirmed. Workflow stopped to avoid a duplicate financial action.`,
+        `Continue was clicked for rule ${rule}, but the post-click financial state could not be safely completed or confirmed. Workflow stopped to avoid a duplicate financial action.`,
         { cause: error },
       );
     }
-    await hooks.onPlatformConfirmed?.();
   }
 }
