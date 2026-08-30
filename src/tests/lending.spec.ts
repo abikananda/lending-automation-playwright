@@ -8,6 +8,10 @@ import { LendingWorkflowService } from '../services/LendingWorkflowService';
 
 const authStatePath = runPaths.authState;
 
+// The workflow has its own 15-minute budget per lending rule. Keep the test-level
+// timeout comfortably above that so multiple configured rules can complete and finalize.
+test.setTimeout(60 * 60 * 1000);
+
 // Each username owns a separate browser storage state, allowing independent parallel processes.
 // If the file is missing, start empty and let the auth verifier fail with a username-specific auth command.
 test.use({
