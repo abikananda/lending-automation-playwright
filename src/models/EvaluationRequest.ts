@@ -14,6 +14,7 @@ export interface EvaluationRequest {
   age: number;
   borrowerType: string;
   repeated: boolean;
+  trusted?: boolean;
   loanType?: string;
   repaymentFrequency?: string;
   gender?: string;
@@ -35,6 +36,7 @@ export function toEvaluationRequest(sessionId: string, borrower: Borrower): Eval
     age: borrower.age,
     borrowerType: borrower.borrowerType,
     repeated: borrower.repeated,
+    trusted: borrower.trusted,
     loanType: borrower.loanType,
     repaymentFrequency: borrower.repaymentFrequency,
     gender: borrower.gender,
