@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { config } from '../config/Config';
-import type { LenderDataResponse } from '../models/LenderData';
+import type { Lender, LenderDataResponse } from '../models/LenderData';
 import { BaseApiClient } from './BaseApiClient';
 
 const lenderSchema = z.object({
@@ -21,16 +22,36 @@ const responseSchema = z.object({
 });
 
 export class LenderApiClient extends BaseApiClient {
-  async getLenderData(): Promise<LenderDataResponse> {
-    this.logApiRequest('GET', config.lenderDataPath, 'LENDER_DATA');
-    const data = await this.get<unknown>(config.lenderDataPath, {
+  async getLenderConfig(): Promise<Lender> {
+    this.logApiRequest('GET', config.lenderConfigPath, 'LENDER_CONFIG');
+    const data = await this.get<unknown>(config.lenderConfigPath, {
       params: { username: config.username },
     });
+    const lender = lenderSchema.parse(data) as Lender;
+    this.assertUsername(lender.username);
+    this.logApiSuccess('LENDER_CONFIG', `username=${lender.username}`);
+    return lender;
+  }
+
+  /**
+   * Backward-compatible workflow entry point. Existing callers keep using
+   * getLenderData(), but session creation is now an explicit POST instead of
+   * a state-changing GET.
+   */
+  async getLenderData(): Promise<LenderDataResponse> {
+    return this.startSession(`PW-${config.username}-${randomUUID()}`);
+  }
+
+  async startSession(ownerId: string): Promise<LenderDataResponse> {
+    this.logApiRequest('POST', config.lenderSessionPath, 'START_SESSION');
+    const data = await this.postFinancial<unknown>(
+      config.lenderSessionPath,
+      { ownerId },
+      { params: { username: config.username } },
+    );
     const result = responseSchema.parse(data) as LenderDataResponse;
-    if (result.lender.username !== config.username) {
-      throw new Error(`Backend returned username ${result.lender.username}, expected ${config.username}`);
-    }
-    this.logApiSuccess('LENDER_DATA', `username=${result.lender.username} sessionId=${result.sessionId}`);
+    this.assertUsername(result.lender.username);
+    this.logApiSuccess('START_SESSION', `username=${result.lender.username} sessionId=${result.sessionId}`);
     return result;
   }
 
@@ -39,5 +60,11 @@ export class LenderApiClient extends BaseApiClient {
     this.logApiRequest('POST', path, 'COMPLETE_SESSION');
     await this.postFinancial<unknown>(path, {});
     this.logApiSuccess('COMPLETE_SESSION', `sessionId=${sessionId}`);
+  }
+
+  private assertUsername(username: string): void {
+    if (username !== config.username) {
+      throw new Error(`Backend returned username ${username}, expected ${config.username}`);
+    }
   }
 }
