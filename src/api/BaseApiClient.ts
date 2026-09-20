@@ -3,6 +3,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig, type AxiosResponse 
 import { config } from '../config/Config';
 import { logger } from '../utils/Logger';
 import { retryTransient } from '../utils/Retry';
+import { buildBackendHeaders } from './BackendHeaders';
 
 export class ApiError extends Error {
   constructor(
@@ -21,19 +22,10 @@ export class BaseApiClient {
   protected readonly http: AxiosInstance;
 
   constructor() {
-    const headers: Record<string, string> = {
-      Accept: '*/*',
-      'Content-Type': 'application/json',
-    };
-
-    if (config.backendApiKey) {
-      headers[config.backendAuthHeader] = config.backendApiKey;
-    }
-
     this.http = axios.create({
       baseURL: config.backendUrl,
       timeout: config.apiTimeout,
-      headers,
+      headers: buildBackendHeaders(config.backendApiKey, config.backendAuthHeader),
     });
 
     this.http.interceptors.request.use((request) => {

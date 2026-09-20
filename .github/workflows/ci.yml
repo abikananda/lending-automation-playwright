@@ -16,6 +16,7 @@ jobs:
     env:
       # Build/lint may import runtime config, but CI never executes the live lending workflow.
       LENDER_USERNAME: ci-validation
+      BACKEND_API_KEY: ci-validation-only-not-a-production-secret
 
     steps:
       - name: Checkout

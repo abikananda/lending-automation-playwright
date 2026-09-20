@@ -20,16 +20,11 @@ function boolEnv(name: string, fallback: boolean): boolean {
   return value.toLowerCase() === 'true';
 }
 
-function optional(name: string): string | undefined {
-  const value = process.env[name]?.trim();
-  return value || undefined;
-}
-
 export const config = {
   lendenClubUrl: required('LENDENCLUB_URL', 'https://app.lendenclub.com'),
   backendUrl: required('BACKEND_URL', 'http://localhost:8080'),
   username: required('LENDER_USERNAME'),
-  backendApiKey: optional('BACKEND_API_KEY'),
+  backendApiKey: required('BACKEND_API_KEY'),
   backendAuthHeader: required('BACKEND_AUTH_HEADER', 'X-API-Key'),
   headless: boolEnv('HEADLESS', false),
   slowMo: numberEnv('SLOW_MO', 100),
