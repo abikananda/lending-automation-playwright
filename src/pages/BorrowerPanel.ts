@@ -55,15 +55,19 @@ export class BorrowerPanel {
       false,
     );
 
+    const loanAmount = parseMoney(loan['Loan Amount']);
+    const tenure = parseMonths(loan.Tenure);
+    if (tenure <= 0) throw new Error('Invalid borrower tenure');
+
     const borrower: Borrower = {
       loanId: (loan['Loan ID'] ?? '').trim(),
       creditScore: parseNumber(risk['Bureau Score']),
       lendenScore: parseNumber(risk['LenDenClub Score']),
       income: parseMoney(professional['Monthly Income']),
-      loanAmount: parseMoney(loan['Loan Amount']),
+      loanAmount,
       interestRate: parsePercent(loan['Annualized Interest Rate']),
-      tenure: parseMonths(loan.Tenure),
-      emi: parseMoney(loan['Loan Amount']) / parseMonths(loan.Tenure),
+      tenure,
+      emi: loanAmount / tenure,
       age: parseNumber(personal.Age),
       borrowerType: (professional.Occupation ?? '').trim(),
       repeated: false,

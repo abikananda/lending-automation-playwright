@@ -163,6 +163,15 @@ export class LendingWorkflowService {
               `Borrower ${ruleParsedBorrowers} fetched data for ${rule}: ${borrower.name} (${borrower.loanId})`,
             );
 
+            if (selectedLoanIds.has(borrower.loanId)) {
+              skipped += 1;
+              const reason = 'Loan already selected earlier in this workflow; duplicate approval prevented';
+              logger.warn(`Skipping previously selected loanId=${borrower.loanId} rule=${rule}`);
+              records.push({ rule, loanId: borrower.loanId, borrowerName: borrower.name, status: 'SKIPPED', reason });
+              await panel.close();
+              continue;
+            }
+
             const evaluation = await borrowerService.evaluate(lenderData.sessionId, rule, borrower);
             this.validateEvaluationIdentity(evaluation, borrower, lenderData.sessionId, rule);
             evaluated += 1;
@@ -195,22 +204,6 @@ export class LendingWorkflowService {
                   `NPA borrower was blocked but hit-count update failed npaId=${npaBorrower.id} loanId=${borrower.loanId}: ${error instanceof Error ? error.message : String(error)}`,
                 );
               }
-              records.push({
-                rule,
-                loanId: borrower.loanId,
-                borrowerName: borrower.name,
-                status: 'SKIPPED',
-                reason,
-                evaluation,
-              });
-              await panel.close();
-              continue;
-            }
-
-            if (selectedLoanIds.has(borrower.loanId)) {
-              skipped += 1;
-              const reason = 'Loan already selected earlier in this workflow; duplicate investment prevented';
-              logger.warn(`Skipping duplicate investment loanId=${borrower.loanId} rule=${rule}`);
               records.push({
                 rule,
                 loanId: borrower.loanId,
@@ -309,6 +302,17 @@ export class LendingWorkflowService {
             if (record.rule === rule && record.status === 'SELECTED') record.status = 'FINALIZED';
           }
           logger.info(`Rule ${rule} finalized successfully`);
+          try {
+            await this.persistenceService.recordFinalizedInvestments(
+              lenderData.sessionId,
+              records.filter((record) => record.rule === rule && record.status === 'FINALIZED'),
+            );
+          } catch (error) {
+            throw new UncertainFinancialStateError(
+              `Rule ${rule} succeeded on the platform, but its investment status could not be fully recorded. Stop and reconcile before another run.`,
+              { cause: error },
+            );
+          }
           await ui.goDashboard();
         }
 
